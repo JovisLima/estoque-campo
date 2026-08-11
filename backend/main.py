@@ -1135,11 +1135,17 @@ def os_ativa_do_tecnico(
 
 
 @app.post("/ordens/{ordem_id}/deslocamento", response_model=OrdemOut)
-def iniciar_deslocamento(ordem_id: int, dados: LocalizacaoOpcional = LocalizacaoOpcional(), db: Session = Depends(get_db)):
+def iniciar_deslocamento(ordem_id: int, dados: LocalizacaoOpcional = LocalizacaoOpcional(), db: Session = Depends(get_db), tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual)):
     """Técnico apertou 'Deslocamento' — está a caminho do local."""
     ordem = db.query(models.OrdemServico).get(ordem_id)
     if not ordem:
         raise HTTPException(404, "Ordem não encontrada")
+
+    if ordem.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta OS pertence a outro tecnico",
+        )
     if ordem.status != models.StatusOS.pendente:
         raise HTTPException(400, "Esta OS não está pendente")
     ordem.status = models.StatusOS.deslocamento
@@ -1152,11 +1158,17 @@ def iniciar_deslocamento(ordem_id: int, dados: LocalizacaoOpcional = Localizacao
 
 
 @app.post("/ordens/{ordem_id}/iniciar", response_model=OrdemOut)
-def iniciar_ordem(ordem_id: int, dados: LocalizacaoOpcional = LocalizacaoOpcional(), db: Session = Depends(get_db)):
+def iniciar_ordem(ordem_id: int, dados: LocalizacaoOpcional = LocalizacaoOpcional(), db: Session = Depends(get_db), tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual)):
     """Técnico chegou no local e apertou 'Iniciar atendimento'."""
     ordem = db.query(models.OrdemServico).get(ordem_id)
     if not ordem:
         raise HTTPException(404, "Ordem não encontrada")
+
+    if ordem.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta OS pertence a outro tecnico",
+        )
     if ordem.status not in (models.StatusOS.pendente, models.StatusOS.deslocamento):
         raise HTTPException(400, "Esta OS não pode ser iniciada nesse estado")
     ordem.status = models.StatusOS.em_andamento
@@ -1207,10 +1219,16 @@ def verificar_manutencao_preventiva(ordem: models.OrdemServico, db: Session):
 
 
 @app.post("/ordens/{ordem_id}/fechar")
-def fechar_ordem(ordem_id: int, dados: FecharOrdemBody = FecharOrdemBody(), db: Session = Depends(get_db)):
+def fechar_ordem(ordem_id: int, dados: FecharOrdemBody = FecharOrdemBody(), db: Session = Depends(get_db), tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual)):
     ordem = db.query(models.OrdemServico).get(ordem_id)
     if not ordem:
         raise HTTPException(404, "Ordem não encontrada")
+
+    if ordem.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta OS pertence a outro tecnico",
+        )
     ordem.status = models.StatusOS.fechada
     ordem.data_fechamento = datetime.utcnow()
     ordem.lat_fim = dados.lat
