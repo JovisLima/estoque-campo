@@ -122,7 +122,7 @@ async function carregarDashboard() {
   const somenteGerencia = adminAtual && adminAtual.papel === "gerencia";
 
   const [rBaixoEstoque, rSolicitacoes, rAvisos, rTransferencias] = await Promise.all([
-    fetch(`${API_URL}/materiais/baixo-estoque`),
+    fetch(`${API_URL}/materiais/baixo-estoque`, { headers: headers() }),
     fetch(`${API_URL}/admin/solicitacoes?status=pendente`, { headers: headers() }),
     fetch(`${API_URL}/admin/avisos?status=aberto`, { headers: headers() }),
     fetch(`${API_URL}/admin/transferencias?status=pendente`, { headers: headers() }),

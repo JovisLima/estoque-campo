@@ -545,11 +545,18 @@ def tecnico_me(
 # ---------- Materiais (catálogo / estoque central) ----------
 
 @app.get("/materiais", response_model=List[MaterialOut])
-def listar_materiais(db: Session = Depends(get_db)):
+def listar_materiais(
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual),
+):
     return db.query(models.Material).order_by(models.Material.nome).all()
 
 
-@app.get("/materiais/baixo-estoque", response_model=List[MaterialOut])
+@app.get(
+    "/materiais/baixo-estoque",
+    response_model=List[MaterialOut],
+    dependencies=[Depends(exigir_papel())],
+)
 def materiais_baixo_estoque(db: Session = Depends(get_db)):
     materiais = db.query(models.Material).all()
     return [m for m in materiais if m.qtd_atual <= m.qtd_minima]
@@ -583,7 +590,11 @@ def registrar_entrada(dados: EntradaEstoque, db: Session = Depends(get_db)):
 
 # ---------- Ferramentas / EPIs (catálogo central) ----------
 
-@app.get("/ferramentas", response_model=List[FerramentaOut])
+@app.get(
+    "/ferramentas",
+    response_model=List[FerramentaOut],
+    dependencies=[Depends(exigir_papel())],
+)
 def listar_ferramentas(db: Session = Depends(get_db)):
     return db.query(models.Ferramenta).order_by(models.Ferramenta.nome).all()
 
