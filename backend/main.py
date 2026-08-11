@@ -1923,39 +1923,6 @@ def admin_listar_ordens(status: Optional[str] = None, cliente_id: Optional[int] 
     return resultado
 
 
-@app.get("/admin/materiais/sugestao-compra", dependencies=[Depends(exigir_papel(models.PapelAdmin.almoxarifado))])
-def sugestao_compra(db: Session = Depends(get_db)):
-    """Sugestão de quanto comprar de cada material com estoque baixo, com
-    base no consumo médio dos últimos 90 dias. É só informativo — NÃO cria
-    nada no Financeiro automaticamente, fica a critério de quem for comprar."""
-    limite = datetime.utcnow() - timedelta(days=90)
-    materiais = db.query(models.Material).filter(
-        models.Material.qtd_atual <= models.Material.qtd_minima
-    ).all()
-
-    sugestoes = []
-    for m in materiais:
-        consumo_total = db.query(models.MovimentacaoEstoque).filter(
-            models.MovimentacaoEstoque.material_id == m.id,
-            models.MovimentacaoEstoque.tipo == models.TipoMovimentacao.saida,
-            models.MovimentacaoEstoque.timestamp >= limite,
-        ).all()
-        total_consumido = sum(mov.quantidade for mov in consumo_total)
-        consumo_mensal_medio = round(total_consumido / 3, 1)  # 90 dias ≈ 3 meses
-
-        # sugere estoque pra 2 meses de consumo médio, cobrindo o déficit atual
-        deficit_ate_minimo = max(m.qtd_minima - m.qtd_atual, 0)
-        sugestao = max(consumo_mensal_medio * 2, deficit_ate_minimo, m.qtd_minima)
-
-        sugestoes.append({
-            "material_id": m.id, "nome": m.nome, "unidade": m.unidade,
-            "qtd_atual": m.qtd_atual, "qtd_minima": m.qtd_minima,
-            "consumo_mensal_medio": consumo_mensal_medio,
-            "sugestao_compra": round(sugestao, 1),
-        })
-    return sugestoes
-
-
 @app.get("/admin/estoque-completo", dependencies=[Depends(exigir_papel(models.PapelAdmin.almoxarifado))])
 def admin_estoque_completo(db: Session = Depends(get_db)):
     """Visão geral do estoque central + ferramentas, pro dashboard do app desktop."""
