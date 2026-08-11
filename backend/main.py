@@ -7,7 +7,7 @@ from typing import Optional, List
 from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from fpdf import FPDF
@@ -302,7 +302,7 @@ class AdminUsuarioAtivo(BaseModel):
 class MovimentacaoCreate(BaseModel):
     ordem_id: int
     material_id: int
-    quantidade: float
+    quantidade: float = Field(gt=0)
     client_uuid: Optional[str] = None
 
 
@@ -310,9 +310,9 @@ class MaterialCreate(BaseModel):
     nome: str
     categoria: Optional[str] = None
     unidade: str = "un"
-    qtd_atual: float = 0
-    qtd_minima: float = 0
-    custo_unitario: float = 0
+    qtd_atual: float = Field(default=0, ge=0)
+    qtd_minima: float = Field(default=0, ge=0)
+    custo_unitario: float = Field(default=0, ge=0)
 
 
 class FerramentaCreate(BaseModel):
@@ -323,21 +323,21 @@ class FerramentaCreate(BaseModel):
 
 class EntradaEstoque(BaseModel):
     material_id: int
-    quantidade: float
+    quantidade: float = Field(gt=0)
 
 
 class TransferenciaCreate(BaseModel):
     tecnico_id: int
     tipo: str  # "material" | "ferramenta"
     material_id: Optional[int] = None
-    quantidade: Optional[float] = None
+    quantidade: Optional[float] = Field(default=None, gt=0)
     ferramenta_id: Optional[int] = None
 
 
 class SolicitacaoCreate(BaseModel):
     tecnico_id: int
     material_id: int
-    quantidade: float
+    quantidade: float = Field(gt=0)
     observacao: Optional[str] = None
     client_uuid: Optional[str] = None
 
