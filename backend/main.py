@@ -1254,7 +1254,8 @@ def fechar_ordem(ordem_id: int, dados: FecharOrdemBody = FecharOrdemBody(), db: 
 
 
 @app.post("/ordens/{ordem_id}/fotos")
-def anexar_foto_ordem(ordem_id: int, dados: FotoOrdemCreate, db: Session = Depends(get_db)):
+def anexar_foto_ordem(ordem_id: int, dados: FotoOrdemCreate, db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual)):
     """Técnico anexa uma foto (base64) tirada durante a OS. Funciona com a
     fila offline do app — a foto fica pendente até sincronizar."""
     if dados.client_uuid:
@@ -1266,6 +1267,12 @@ def anexar_foto_ordem(ordem_id: int, dados: FotoOrdemCreate, db: Session = Depen
     if not ordem:
         raise HTTPException(404, "Ordem não encontrada")
 
+
+    if ordem.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta OS pertence a outro tecnico",
+        )
     try:
         dados_binarios = base64.b64decode(dados.imagem_base64.split(",")[-1])
     except Exception:
