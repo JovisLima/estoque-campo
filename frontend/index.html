@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Aven Connect - Estoque de Campo</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0f172a">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, Roboto, Arial, sans-serif;
+    background: #0f172a; color: #e2e8f0; min-height: 100vh;
+  }
+  header {
+    padding: 10px 16px; background: #1e293b; display: flex;
+    justify-content: space-between; align-items: center;
+    position: sticky; top: 0; z-index: 10;
+  }
+  header .marca { display: flex; align-items: center; gap: 10px; }
+  header img.logo { height: 36px; width: auto; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; color: #e2e8f0; }
+  header h1 span { display: block; font-size: 11px; color: #94a3b8; font-weight: 400; }
+  #status-conexao { font-size: 12px; padding: 4px 10px; border-radius: 12px; }
+  .online { background: #14532d; color: #86efac; }
+  .offline { background: #7c2d12; color: #fdba74; }
+  main { padding: 16px; max-width: 480px; margin: 0 auto; padding-bottom: 90px; }
+  .card {
+    background: #1e293b; border-radius: 12px; padding: 16px; margin-bottom: 12px;
+  }
+  label { display: block; font-size: 13px; color: #94a3b8; margin-bottom: 4px; margin-top: 12px; }
+  input, select, textarea {
+    width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #334155;
+    background: #0f172a; color: #e2e8f0; font-size: 16px;
+  }
+  button {
+    width: 100%; padding: 14px; border-radius: 8px; border: none;
+    background: #2563eb; color: white; font-size: 16px; font-weight: 600;
+    margin-top: 16px; cursor: pointer;
+  }
+  button.secundario { background: #334155; }
+  button.perigo { background: #b91c1c; }
+  .item-lista {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 0; border-bottom: 1px solid #334155; font-size: 14px;
+  }
+  .pendente { color: #fdba74; font-size: 11px; }
+  .oculto { display: none; }
+  .fila-badge {
+    background: #7c2d12; color: #fdba74; border-radius: 10px;
+    padding: 2px 8px; font-size: 11px; margin-left: 6px;
+  }
+  /* Barra de abas fixa embaixo, estilo app de celular */
+  #tabbar {
+    position: fixed; bottom: 0; left: 0; right: 0; background: #1e293b;
+    display: flex; border-top: 1px solid #334155; z-index: 20;
+  }
+  #tabbar button {
+    flex: 1; background: none; margin: 0; border-radius: 0; padding: 12px 8px;
+    font-size: 13px; font-weight: 500; color: #94a3b8;
+  }
+  #tabbar button.ativa { color: #60a5fa; border-top: 2px solid #2563eb; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="marca">
+    <img class="logo" src="assets/logo.png" alt="Aven Connect">
+    <h1>Aven Connect<span>Estoque de Campo</span></h1>
+  </div>
+  <span id="status-conexao" class="online">online</span>
+</header>
+
+<main>
+
+  <!-- TELA DE LOGIN -->
+  <section id="tela-login" class="card">
+    <label>Usuário</label>
+    <input id="login-input" placeholder="ex: tecnico1">
+    <label>PIN</label>
+    <input id="pin-input" type="password" inputmode="numeric" placeholder="****">
+    <button onclick="fazerLogin()">Entrar</button>
+    <p id="login-erro" style="color:#f87171; font-size:13px;"></p>
+  </section>
+
+  <!-- TELA PRINCIPAL -->
+  <section id="tela-principal" class="oculto">
+    <div class="card">
+      <div style="display:flex; justify-content:space-between;">
+        <span id="nome-tecnico"></span>
+        <span onclick="logout()" style="color:#f87171; cursor:pointer;">sair</span>
+      </div>
+    </div>
+
+    <!-- ===== ABA: ORDENS DE SERVIÇO ===== -->
+    <div id="tab-ordens">
+      <div id="card-pendentes" class="card oculto">
+        <h3 style="margin-top:0;">📋 OS atribuídas a você</h3>
+        <div id="lista-pendentes"></div>
+      </div>
+
+      <!-- OS ATIVA (fase deslocamento OU em_andamento) -->
+      <div id="card-os-ativa" class="card oculto">
+        <h3 style="margin-top:0;" id="os-ativa-titulo">OS: <span id="os-ativa-local"></span></h3>
+        <p id="os-ativa-status" style="font-size:13px; color:#94a3b8; margin-top:-8px;"></p>
+
+        <div id="rota-cabo-area" class="oculto" style="margin-bottom:12px;">
+          <button type="button" class="secundario" onclick="mostrarRotaCabo()">🗺️ Ver rota do cabo (referência)</button>
+          <img id="rota-cabo-imagem" class="oculto" style="width:100%; border-radius:8px; margin-top:8px;">
+        </div>
+
+        <!-- FASE: DESLOCAMENTO -->
+        <div id="fase-deslocamento" class="oculto">
+          <p style="color:#fdba74; font-size:14px;">🚗 Você está a caminho. Quando chegar no local, toque abaixo.</p>
+          <button onclick="chegouNoLocal()">▶️ Cheguei — Iniciar atendimento</button>
+        </div>
+
+        <!-- FASE: EM ANDAMENTO (trabalho no local) -->
+        <div id="fase-em-andamento" class="oculto">
+          <label>Adicionar material usado (do seu estoque pessoal)</label>
+          <select id="select-material"></select>
+          <input id="qtd-material" type="number" step="0.1" placeholder="Quantidade" style="margin-top:8px;">
+          <button onclick="adicionarMaterial()">+ Adicionar material</button>
+
+          <div id="lista-itens-os" style="margin-top:16px;"></div>
+
+          <label style="margin-top:20px;">📷 Fotos da atividade</label>
+          <input type="file" id="input-foto" accept="image/*" capture="environment" class="oculto" onchange="fotoSelecionada(event)">
+          <button type="button" class="secundario" onclick="document.getElementById('input-foto').click()">📷 Tirar / anexar foto</button>
+          <div id="lista-fotos-os" style="display:flex; flex-wrap:wrap; gap:8px; margin-top:10px;"></div>
+
+          <div id="checklist-area" class="oculto">
+            <label style="margin-top:20px;">✅ Checklist de boas práticas (fibra óptica)</label>
+            <label style="display:flex; align-items:center; gap:8px; margin-top:8px;">
+              <input type="checkbox" id="chk-limpar-conector" style="width:auto; margin:0;"> Limpou o conector
+            </label>
+            <label style="display:flex; align-items:center; gap:8px; margin-top:8px;">
+              <input type="checkbox" id="chk-testar-sinal" style="width:auto; margin:0;"> Testou o sinal
+            </label>
+            <label style="display:flex; align-items:center; gap:8px; margin-top:8px;">
+              <input type="checkbox" id="chk-verificar-otdr" style="width:auto; margin:0;"> Verificou integridade com OTDR
+            </label>
+          </div>
+
+          <button class="perigo" onclick="fecharOrdem()">✅ Finalizar OS</button>
+        </div>
+      </div>
+
+      <div id="card-os-avulsa" class="card">
+        <h3 style="margin-top:0;">Nova Ordem de Serviço (avulsa)</h3>
+        <label>Tipo</label>
+        <select id="os-tipo">
+          <option value="instalacao">Instalação</option>
+          <option value="manutencao">Manutenção</option>
+        </select>
+        <label>Cliente / Local</label>
+        <input id="os-local" placeholder="ex: Fazenda Santa Rita">
+        <label>Nome do cliente</label>
+        <input id="os-nome-cliente" placeholder="ex: José da Silva">
+        <label>Endereço</label>
+        <input id="os-endereco" placeholder="ex: Estrada Municipal km 5, s/n">
+        <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
+          <input type="checkbox" id="os-prioridade" style="width:auto; margin:0;">
+          🔴 Marcar como prioridade
+        </label>
+        <label>Observações</label>
+        <textarea id="os-obs" rows="2"></textarea>
+        <button onclick="abrirOrdem()">▶️ Iniciar nova OS</button>
+      </div>
+    </div>
+
+    <!-- ===== ABA: MATERIAIS ===== -->
+    <div id="tab-materiais" class="oculto">
+      <div class="card">
+        <h3 style="margin-top:0;">💼 Meu saldo de materiais</h3>
+        <div id="lista-meu-saldo"></div>
+      </div>
+
+      <div id="card-transferencias" class="card oculto">
+        <h3 style="margin-top:0;">📥 Itens enviados pelo estoque</h3>
+        <div id="lista-transferencias"></div>
+      </div>
+
+      <div id="card-minhas-ferramentas" class="card oculto">
+        <h3 style="margin-top:0;">🧰 Minhas ferramentas / EPIs</h3>
+        <div id="lista-minhas-ferramentas"></div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0;">📦 Solicitar material ao estoque</h3>
+        <label>Material</label>
+        <select id="solic-material"></select>
+        <label>Quantidade</label>
+        <input id="solic-qtd" type="number" step="0.1">
+        <label>Observação (opcional)</label>
+        <input id="solic-obs" placeholder="ex: pra instalação de amanhã">
+        <button onclick="solicitarMaterial()">Enviar solicitação</button>
+        <p id="solic-msg" style="color:#86efac; font-size:13px;"></p>
+        <div id="lista-minhas-solicitacoes" style="margin-top:12px;"></div>
+      </div>
+
+      <div class="card">
+        <div style="display:flex; align-items:center;">
+          <strong>Fila de sincronização</strong>
+          <span id="fila-contador" class="fila-badge oculto">0</span>
+        </div>
+        <div id="lista-fila" style="font-size:13px; margin-top:8px;"></div>
+      </div>
+    </div>
+
+    <!-- ===== ABA: PERFIL ===== -->
+    <div id="tab-perfil" class="oculto">
+      <div class="card" style="text-align:center;">
+        <img id="perfil-foto" src="" class="oculto" style="width:100px; height:100px; border-radius:50%; object-fit:cover; margin-bottom:8px;">
+        <div id="perfil-sem-foto" style="width:100px; height:100px; border-radius:50%; background:#334155; display:flex; align-items:center; justify-content:center; font-size:36px; margin:0 auto 8px;">👤</div>
+        <h3 id="perfil-nome" style="margin:8px 0 0;"></h3>
+        <p id="perfil-adm" style="color:#93c5fd; font-size:13px; margin:2px 0;"></p>
+      </div>
+      <div class="card">
+        <div class="item-lista"><span>Login</span><strong id="perfil-login"></strong></div>
+        <div class="item-lista"><span>Telefone</span><strong id="perfil-telefone"></strong></div>
+        <div class="item-lista"><span>Contratado em</span><strong id="perfil-data"></strong></div>
+      </div>
+      <p style="color:#64748b; font-size:12px; text-align:center;">
+        Essas informações são cadastradas pelo estoque. Se algo estiver
+        errado, avise o responsável.
+      </p>
+    </div>
+
+  </section>
+
+</main>
+
+<!-- Barra de navegação fixa embaixo -->
+<div id="tabbar" class="oculto">
+  <button id="btn-tab-ordens" class="ativa" onclick="mudarTab('ordens')">🧾<br>Ordens de Serviço</button>
+  <button id="btn-tab-materiais" onclick="mudarTab('materiais')">📦<br>Materiais</button>
+  <button id="btn-tab-perfil" onclick="mudarTab('perfil')">👤<br>Perfil</button>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+[Unit]
+Description=Aven Connect - Backend Estoque de Campo
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/estoque-campo/backend
+EnvironmentFile=/opt/estoque-campo/backend/.env
+ExecStart=/opt/estoque-campo/backend/venv/bin/gunicorn main:app -w 2 -k uvicorn.workers.UvicornWorker -b 127.0.0.1:8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

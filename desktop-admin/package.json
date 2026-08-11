@@ -1,0 +1,20 @@
+{
+  "name": "aven-connect-estoque-admin",
+  "version": "1.0.0",
+  "description": "Aven Connect - Painel Admin/Estoque de Campo",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build-win": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.avenconnect.estoque.admin",
+    "productName": "Aven Connect - Estoque",
+    "win": { "target": "nsis", "icon": "src/assets/logo.ico" },
+    "files": ["main.js", "src/**/*"]
+  }
+}
