@@ -891,34 +891,7 @@ def ferramentas_do_tecnico(
     ]
 
 
-# ---------- Clientes (cadastro + foto da rota do cabo) ----------
-
-def listar_clientes(db: Session = Depends(get_db)):
-    return db.query(models.Cliente).order_by(models.Cliente.nome).all()
-
-
-def criar_cliente(dados: ClienteCreate, db: Session = Depends(get_db)):
-    cliente = models.Cliente(**dados.model_dump())
-    db.add(cliente)
-    db.commit()
-    db.refresh(cliente)
-    return cliente
-
-
-async def upload_rota_cabo(cliente_id: int, arquivo: UploadFile = File(...), db: Session = Depends(get_db)):
-    cliente = db.query(models.Cliente).get(cliente_id)
-    if not cliente:
-        raise HTTPException(404, "Cliente não encontrado")
-    extensao = os.path.splitext(arquivo.filename or "rota.jpg")[1] or ".jpg"
-    caminho = os.path.join(PASTA_ROTAS_CABO, f"cliente_{cliente_id}{extensao}")
-    conteudo = await arquivo.read()
-    with open(caminho, "wb") as f:
-        f.write(conteudo)
-    cliente.imagem_rota_cabo = caminho
-    db.commit()
-    return {"status": "ok"}
-
-
+# ---------- Acesso do tecnico aos clientes ----------
 
 def obter_cliente_do_tecnico(
     cliente_id: int,
