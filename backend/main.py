@@ -1066,38 +1066,63 @@ def sugestao_compra(db: Session = Depends(get_db)):
 # ---------- Ordens de Serviço ----------
 
 @app.post("/ordens", response_model=OrdemOut)
-def criar_ordem(dados: OrdemCreate, db: Session = Depends(get_db)):
-    # se o técnico reenviar (ex: sincronização offline duplicada), retorna a existente
+def criar_ordem(
+    dados: OrdemCreate,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual),
+):
+    # O tecnico informado no JSON precisa ser o mesmo do JWT.
+    if dados.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Nao e permitido abrir OS em nome de outro tecnico",
+        )
+
+    # Reenvio offline/idempotencia.
     if dados.client_uuid:
         existente = db.query(models.OrdemServico).filter_by(
             client_uuid=dados.client_uuid
         ).first()
+
         if existente:
+            if existente.tecnico_id != tecnico_atual.id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="OS existente pertence a outro tecnico",
+                )
+
             return existente
 
-    # OS avulsa (criada pelo próprio técnico, sem passar pelo admin) só é
-    # permitida pra técnicos marcados como ADM
-    tecnico = db.query(models.Tecnico).get(dados.tecnico_id)
-    if not tecnico:
-        raise HTTPException(404, "Técnico não encontrado")
-    if not tecnico.is_adm:
-        raise HTTPException(403, "Apenas técnicos ADM podem abrir OS avulsa")
+    # OS avulsa continua restrita a tecnico ADM.
+    if not tecnico_atual.is_adm:
+        raise HTTPException(
+            status_code=403,
+            detail="Apenas tecnicos ADM podem abrir OS avulsa",
+        )
 
-    # técnico já decidiu ir até o local ao criar a OS avulsa, então ela
-    # nasce direto em "deslocamento" (pula o estágio "pendente")
     dados_ordem = dados.model_dump()
     lat = dados_ordem.pop("lat")
     lon = dados_ordem.pop("lon")
+
     ordem = models.OrdemServico(
-        **dados_ordem, status=models.StatusOS.deslocamento,
-        data_deslocamento=datetime.utcnow(), lat_deslocamento=lat, lon_deslocamento=lon,
+        **dados_ordem,
+        status=models.StatusOS.deslocamento,
+        data_deslocamento=datetime.utcnow(),
+        lat_deslocamento=lat,
+        lon_deslocamento=lon,
     )
+
     db.add(ordem)
+
     try:
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(409, "Ordem já registrada (client_uuid duplicado)")
+        raise HTTPException(
+            status_code=409,
+            detail="Ordem ja registrada (client_uuid duplicado)",
+        )
+
     db.refresh(ordem)
     return ordem
 
