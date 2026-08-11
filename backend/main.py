@@ -774,10 +774,17 @@ def transferencias_pendentes_do_tecnico(
 
 
 @app.post("/transferencias/{transferencia_id}/confirmar")
-def confirmar_transferencia(transferencia_id: int, db: Session = Depends(get_db)):
+def confirmar_transferencia(transferencia_id: int, db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual)):
     t = db.query(models.Transferencia).get(transferencia_id)
     if not t:
         raise HTTPException(404, "Transferência não encontrada")
+
+    if t.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta transfer?ncia pertence a outro t?cnico",
+        )
     if t.status != models.StatusTransferencia.pendente:
         return {"status": "já processada"}
 
@@ -803,10 +810,17 @@ def confirmar_transferencia(transferencia_id: int, db: Session = Depends(get_db)
 
 
 @app.post("/transferencias/{transferencia_id}/recusar")
-def recusar_transferencia(transferencia_id: int, db: Session = Depends(get_db)):
+def recusar_transferencia(transferencia_id: int, db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual)):
     t = db.query(models.Transferencia).get(transferencia_id)
     if not t:
         raise HTTPException(404, "Transferência não encontrada")
+
+    if t.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta transfer?ncia pertence a outro t?cnico",
+        )
     if t.status != models.StatusTransferencia.pendente:
         return {"status": "já processada"}
 
