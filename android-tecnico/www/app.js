@@ -177,7 +177,14 @@ function renderizarPerfil(perfil) {
   const img = document.getElementById("perfil-foto");
   const semFoto = document.getElementById("perfil-sem-foto");
   if (perfil.tem_foto_perfil) {
-    img.src = `${API_URL}/tecnicos/${tecnico.id}/foto-perfil?t=${Date.now()}`;
+    carregarImagemAutenticada(
+      img,
+      `${API_URL}/tecnicos/${tecnico.id}/foto-perfil?t=${Date.now()}`
+    ).catch((erro) => {
+      console.error("Erro ao carregar foto de perfil:", erro);
+      img.classList.add("oculto");
+      semFoto.classList.remove("oculto");
+    });
     img.classList.remove("oculto");
     semFoto.classList.add("oculto");
   } else {

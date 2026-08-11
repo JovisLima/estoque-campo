@@ -1818,11 +1818,49 @@ async def admin_upload_foto_perfil(tecnico_id: int, arquivo: UploadFile = File(.
     return {"status": "ok"}
 
 
-@app.get("/tecnicos/{tecnico_id}/foto-perfil")
-def ver_foto_perfil(tecnico_id: int, db: Session = Depends(get_db)):
+@app.get(
+    "/tecnicos/{tecnico_id}/foto-perfil",
+)
+def ver_foto_perfil(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(exigir_mesmo_tecnico),
+):
     tecnico = db.query(models.Tecnico).get(tecnico_id)
-    if not tecnico or not tecnico.foto_perfil or not os.path.exists(tecnico.foto_perfil):
-        raise HTTPException(404, "Sem foto de perfil")
+
+    if (
+        not tecnico
+        or not tecnico.foto_perfil
+        or not os.path.exists(tecnico.foto_perfil)
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Sem foto de perfil",
+        )
+
+    return FileResponse(tecnico.foto_perfil)
+
+
+@app.get(
+    "/admin/tecnicos/{tecnico_id}/foto-perfil",
+    dependencies=[Depends(exigir_papel())],
+)
+def admin_ver_foto_perfil(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+):
+    tecnico = db.query(models.Tecnico).get(tecnico_id)
+
+    if (
+        not tecnico
+        or not tecnico.foto_perfil
+        or not os.path.exists(tecnico.foto_perfil)
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Sem foto de perfil",
+        )
+
     return FileResponse(tecnico.foto_perfil)
 
 

@@ -16,6 +16,32 @@ function headers() {
   };
 }
 
+async function carregarFotoTecnicoAdmin(img, tecnicoId) {
+  try {
+    const resposta = await fetch(
+      `${API_URL}/admin/tecnicos/${tecnicoId}/foto-perfil`,
+      { headers: headers() }
+    );
+
+    if (!resposta.ok) {
+      throw new Error(`HTTP ${resposta.status}`);
+    }
+
+    const blob = await resposta.blob();
+    const objectUrl = URL.createObjectURL(blob);
+
+    img.dataset.objectUrl = objectUrl;
+    img.src = objectUrl;
+  } catch (erro) {
+    console.error(
+      `Erro ao carregar foto do tecnico ${tecnicoId}:`,
+      erro
+    );
+
+    img.style.display = "none";
+  }
+}
+
 // Abas que só o papel "gerencia" pode ver. Almoxarifado só mexe em
 // estoque/transferências/solicitações/avisos.
 const ABAS_SOMENTE_GERENCIA = ["ordens", "tecnicos", "financeiro", "usuarios", "clientes"];
@@ -602,7 +628,7 @@ async function carregarTecnicos() {
     <tr>
       <td style="display:flex; align-items:center; gap:8px;">
         ${t.tem_foto_perfil
-          ? `<img src="${API_URL}/tecnicos/${t.id}/foto-perfil" style="width:28px;height:28px;border-radius:50%;object-fit:cover;">`
+          ? `<img class="foto-tecnico-admin" data-tecnico-id="${t.id}" style="width:28px;height:28px;border-radius:50%;object-fit:cover;">`
           : `<span style="width:28px;height:28px;border-radius:50%;background:#334155;display:inline-flex;align-items:center;justify-content:center;font-size:14px;">👤</span>`}
         ${t.nome}
       </td>
@@ -616,6 +642,15 @@ async function carregarTecnicos() {
       </td>
     </tr>
   `).join("");
+
+  document
+    .querySelectorAll(".foto-tecnico-admin")
+    .forEach((img) => {
+      carregarFotoTecnicoAdmin(
+        img,
+        img.dataset.tecnicoId
+      );
+    });
 
   // só técnicos aprovados aparecem pra atribuir OS / receber transferência
   const aprovados = tecnicosCache.filter(t => t.aprovado);
