@@ -27,6 +27,25 @@ async function apiFetch(url, options = {}) {
   });
 }
 
+async function carregarImagemAutenticada(img, url) {
+  const resposta = await apiFetch(url);
+
+  if (!resposta.ok) {
+    throw new Error(`HTTP ${resposta.status}`);
+  }
+
+  const blob = await resposta.blob();
+
+  if (img.dataset.objectUrl) {
+    URL.revokeObjectURL(img.dataset.objectUrl);
+  }
+
+  const objectUrl = URL.createObjectURL(blob);
+
+  img.dataset.objectUrl = objectUrl;
+  img.src = objectUrl;
+}
+
 
 function uuid() {
   return crypto.randomUUID ? crypto.randomUUID() :
@@ -493,7 +512,12 @@ function mostrarOsAtiva() {
 function mostrarRotaCabo() {
   const img = document.getElementById("rota-cabo-imagem");
   if (img.classList.contains("oculto")) {
-    img.src = `${API_URL}/clientes/${osAtiva.cliente_id}/rota-cabo`;
+    carregarImagemAutenticada(
+      img,
+      `${API_URL}/clientes/${osAtiva.cliente_id}/rota-cabo`
+    ).catch((erro) => {
+      console.error("Erro ao carregar rota de cabo:", erro);
+    });
     img.classList.remove("oculto");
   } else {
     img.classList.add("oculto");

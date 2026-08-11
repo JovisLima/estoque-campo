@@ -911,49 +911,74 @@ async def upload_rota_cabo(cliente_id: int, arquivo: UploadFile = File(...), db:
     return {"status": "ok"}
 
 
-@app.get("/clientes/{cliente_id}")
-def ver_cliente(cliente_id: int, db: Session = Depends(get_db)):
-    """Endpoint público (sem senha de admin) — o app do técnico usa isso
-    pra saber se tem imagem da rota do cabo antes de exibir o botão."""
+
+def obter_cliente_do_tecnico(
+    cliente_id: int,
+    tecnico_atual: models.Tecnico,
+    db: Session,
+) -> models.Cliente:
+
     cliente = db.query(models.Cliente).get(cliente_id)
+
     if not cliente:
-        raise HTTPException(404, "Cliente não encontrado")
-    return {
-        "id": cliente.id, "nome": cliente.nome, "endereco": cliente.endereco,
-        "observacoes": cliente.observacoes, "tem_imagem_rota": cliente.tem_imagem_rota,
-    }
+        raise HTTPException(
+            status_code=404,
+            detail="Cliente nao encontrado",
+        )
+
+    vinculo = (
+        db.query(models.OrdemServico.id)
+        .filter(
+            models.OrdemServico.cliente_id == cliente_id,
+            models.OrdemServico.tecnico_id == tecnico_atual.id,
+        )
+        .first()
+    )
+
+    if not vinculo:
+        raise HTTPException(
+            status_code=403,
+            detail="Este cliente nao pertence a uma OS do tecnico autenticado",
+        )
+
+    return cliente
+
+
+@app.get("/clientes/{cliente_id}", response_model=ClienteOut)
+def ver_cliente(
+    cliente_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual),
+):
+    return obter_cliente_do_tecnico(
+        cliente_id,
+        tecnico_atual,
+        db,
+    )
 
 
 @app.get("/clientes/{cliente_id}/rota-cabo")
-def ver_imagem_rota_cabo(cliente_id: int, db: Session = Depends(get_db)):
-    """Também público — é só uma foto de referência pro técnico em campo."""
-    cliente = db.query(models.Cliente).get(cliente_id)
-    if not cliente or not cliente.imagem_rota_cabo or not os.path.exists(cliente.imagem_rota_cabo):
-        raise HTTPException(404, "Sem imagem de rota do cabo")
+def ver_rota_cabo(
+    cliente_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual),
+):
+    cliente = obter_cliente_do_tecnico(
+        cliente_id,
+        tecnico_atual,
+        db,
+    )
+
+    if (
+        not cliente.imagem_rota_cabo
+        or not os.path.exists(cliente.imagem_rota_cabo)
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Sem imagem de rota cadastrada",
+        )
+
     return FileResponse(cliente.imagem_rota_cabo)
-
-
-@app.get("/admin/clientes/{cliente_id}/historico", dependencies=[Depends(exigir_papel())])
-def historico_cliente(cliente_id: int, db: Session = Depends(get_db)):
-    """Todas as OS já feitas nesse cliente — ajuda a enxergar problemas
-    recorrentes no mesmo local."""
-    cliente = db.query(models.Cliente).get(cliente_id)
-    if not cliente:
-        raise HTTPException(404, "Cliente não encontrado")
-    ordens = db.query(models.OrdemServico).filter_by(cliente_id=cliente_id).order_by(
-        models.OrdemServico.data_abertura.desc()
-    ).all()
-    return {
-        "cliente": cliente.nome,
-        "ordens": [
-            {
-                "id": o.id, "tipo": o.tipo, "status": o.status, "tecnico": o.tecnico.nome,
-                "data_abertura": o.data_abertura, "data_fechamento": o.data_fechamento,
-                "prioridade": o.prioridade,
-            }
-            for o in ordens
-        ],
-    }
 
 
 # ---------- Clientes (cadastro central, com foto da rota do cabo) ----------
@@ -985,26 +1010,6 @@ async def upload_rota_cabo(cliente_id: int, arquivo: UploadFile = File(...), db:
     cliente.imagem_rota_cabo = caminho
     db.commit()
     return {"status": "ok"}
-
-
-@app.get("/clientes/{cliente_id}/rota-cabo")
-def ver_rota_cabo(cliente_id: int, db: Session = Depends(get_db)):
-    """Sem exigir login de admin — o app do técnico também precisa ver essa
-    imagem quando estiver atendendo uma OS vinculada a esse cliente."""
-    cliente = db.query(models.Cliente).get(cliente_id)
-    if not cliente or not cliente.imagem_rota_cabo or not os.path.exists(cliente.imagem_rota_cabo):
-        raise HTTPException(404, "Sem imagem de rota cadastrada")
-    return FileResponse(cliente.imagem_rota_cabo)
-
-
-@app.get("/clientes/{cliente_id}", response_model=ClienteOut)
-def ver_cliente(cliente_id: int, db: Session = Depends(get_db)):
-    """Público (sem senha de admin) — usado pelo app do técnico pra saber
-    se o cliente da OS atual tem imagem de rota de cabo cadastrada."""
-    cliente = db.query(models.Cliente).get(cliente_id)
-    if not cliente:
-        raise HTTPException(404, "Cliente não encontrado")
-    return cliente
 
 
 @app.get("/admin/clientes/{cliente_id}/historico", dependencies=[Depends(exigir_papel())])
@@ -1341,10 +1346,20 @@ def ver_foto_ordem(ordem_id: int, foto_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/ordens/{ordem_id}")
-def ver_ordem(ordem_id: int, db: Session = Depends(get_db)):
+def ver_ordem(
+    ordem_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual),
+):
     ordem = db.query(models.OrdemServico).get(ordem_id)
     if not ordem:
         raise HTTPException(404, "Ordem não encontrada")
+
+    if ordem.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta OS pertence a outro tecnico",
+        )
     return {
         "id": ordem.id,
         "cliente_local": ordem.cliente_local,
