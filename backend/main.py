@@ -1339,9 +1339,19 @@ def registrar_uso_material(dados: MovimentacaoCreate, db: Session = Depends(get_
 # ---------- Solicitações de material (técnico pede, admin aprova) ----------
 
 @app.post("/solicitacoes")
-def criar_solicitacao(dados: SolicitacaoCreate, db: Session = Depends(get_db)):
+def criar_solicitacao(
+    dados: SolicitacaoCreate,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual),
+):
     """Técnico pede material do estoque central. Fica pendente até o admin
     aprovar ou rejeitar."""
+    if dados.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="N?o ? permitido solicitar material em nome de outro t?cnico",
+        )
+
     if dados.client_uuid:
         existente = db.query(models.SolicitacaoMaterial).filter_by(
             client_uuid=dados.client_uuid
