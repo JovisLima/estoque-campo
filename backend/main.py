@@ -635,12 +635,25 @@ def enviar_ferramenta_manutencao(ferramenta_id: int, db: Session = Depends(get_d
 # ---------- Avisos de problema (técnico notifica, admin resolve) ----------
 
 @app.post("/ferramentas/avisos")
-def criar_aviso(dados: AvisoCreate, db: Session = Depends(get_db)):
+def criar_aviso(dados: AvisoCreate, db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual)):
     """Técnico avisa que uma ferramenta/EPI que está com ele quebrou ou
     gastou. Não muda o estoque sozinho — só o admin resolve isso."""
     ferramenta = db.query(models.Ferramenta).get(dados.ferramenta_id)
     if not ferramenta:
         raise HTTPException(404, "Ferramenta não encontrada")
+
+    if dados.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Nao e permitido criar aviso em nome de outro tecnico",
+        )
+
+    if ferramenta.tecnico_atual_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta ferramenta nao pertence ao tecnico autenticado",
+        )
     aviso = models.AvisoFerramenta(
         ferramenta_id=dados.ferramenta_id, tecnico_id=dados.tecnico_id,
         descricao=dados.descricao,
