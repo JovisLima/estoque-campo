@@ -893,12 +893,10 @@ def ferramentas_do_tecnico(
 
 # ---------- Clientes (cadastro + foto da rota do cabo) ----------
 
-@app.get("/admin/clientes", response_model=List[ClienteOut], dependencies=[Depends(exigir_papel())])
 def listar_clientes(db: Session = Depends(get_db)):
     return db.query(models.Cliente).order_by(models.Cliente.nome).all()
 
 
-@app.post("/admin/clientes", response_model=ClienteOut, dependencies=[Depends(exigir_papel())])
 def criar_cliente(dados: ClienteCreate, db: Session = Depends(get_db)):
     cliente = models.Cliente(**dados.model_dump())
     db.add(cliente)
@@ -907,7 +905,6 @@ def criar_cliente(dados: ClienteCreate, db: Session = Depends(get_db)):
     return cliente
 
 
-@app.post("/admin/clientes/{cliente_id}/rota-cabo", dependencies=[Depends(exigir_papel())])
 async def upload_rota_cabo(cliente_id: int, arquivo: UploadFile = File(...), db: Session = Depends(get_db)):
     cliente = db.query(models.Cliente).get(cliente_id)
     if not cliente:
