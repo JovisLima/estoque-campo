@@ -1316,7 +1316,8 @@ def ver_ordem(ordem_id: int, db: Session = Depends(get_db)):
 # ---------- Movimentação de estoque (baixa automática no estoque PESSOAL) ----------
 
 @app.post("/movimentacoes")
-def registrar_uso_material(dados: MovimentacaoCreate, db: Session = Depends(get_db)):
+def registrar_uso_material(dados: MovimentacaoCreate, db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual)):
     # idempotência: se o celular reenviar a mesma ação offline, não duplica
     if dados.client_uuid:
         existente = db.query(models.MovimentacaoEstoque).filter_by(
@@ -1333,6 +1334,12 @@ def registrar_uso_material(dados: MovimentacaoCreate, db: Session = Depends(get_
     if not ordem:
         raise HTTPException(404, "Ordem não encontrada")
 
+
+    if ordem.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta OS pertence a outro tecnico",
+        )
     # BAIXA AUTOMÁTICA no estoque PESSOAL do técnico dono da OS (não no
     # estoque central — esse já foi debitado quando a transferência saiu)
     pessoal = db.query(models.EstoquePessoal).filter_by(
@@ -1343,6 +1350,14 @@ def registrar_uso_material(dados: MovimentacaoCreate, db: Session = Depends(get_
             tecnico_id=ordem.tecnico_id, material_id=dados.material_id, qtd_atual=0
         )
         db.add(pessoal)
+    if not pessoal or pessoal.qtd_atual < dados.quantidade:
+        disponivel = pessoal.qtd_atual if pessoal else 0
+
+        raise HTTPException(
+            status_code=400,
+            detail=f"Estoque pessoal insuficiente. Disponivel: {disponivel}",
+        )
+
     pessoal.qtd_atual -= dados.quantidade
 
     mov = models.MovimentacaoEstoque(
