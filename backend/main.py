@@ -271,6 +271,23 @@ def obter_tecnico_atual(
     return tecnico
 
 
+
+def exigir_mesmo_tecnico(
+    tecnico_id: int,
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual),
+) -> models.Tecnico:
+    """
+    Garante que o ID solicitado na URL pertence ao t?cnico autenticado.
+    """
+    if tecnico_atual.id != tecnico_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Voc? n?o tem permiss?o para acessar dados de outro t?cnico",
+        )
+
+    return tecnico_atual
+
+
 class TecnicoLogin(BaseModel):
     login: str
     pin: str
@@ -735,7 +752,11 @@ def listar_transferencias(status: Optional[str] = None, db: Session = Depends(ge
 
 
 @app.get("/tecnicos/{tecnico_id}/transferencias-pendentes")
-def transferencias_pendentes_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
+def transferencias_pendentes_do_tecnico(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(exigir_mesmo_tecnico),
+):
     """App do técnico chama isso pra mostrar o que precisa confirmar recebimento."""
     transferencias = db.query(models.Transferencia).filter_by(
         tecnico_id=tecnico_id, status=models.StatusTransferencia.pendente
@@ -803,7 +824,11 @@ def recusar_transferencia(transferencia_id: int, db: Session = Depends(get_db)):
 # ---------- Estoque pessoal e ferramentas do técnico (consulta) ----------
 
 @app.get("/tecnicos/{tecnico_id}/estoque-pessoal")
-def estoque_pessoal_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
+def estoque_pessoal_do_tecnico(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(exigir_mesmo_tecnico),
+):
     itens = db.query(models.EstoquePessoal).filter_by(tecnico_id=tecnico_id).all()
     return [
         {
@@ -815,7 +840,11 @@ def estoque_pessoal_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/tecnicos/{tecnico_id}/ferramentas")
-def ferramentas_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
+def ferramentas_do_tecnico(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(exigir_mesmo_tecnico),
+):
     ferramentas = db.query(models.Ferramenta).filter_by(
         tecnico_atual_id=tecnico_id, status=models.StatusFerramenta.com_tecnico
     ).all()
@@ -1047,7 +1076,11 @@ def criar_ordem(dados: OrdemCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/tecnicos/{tecnico_id}/ordens-pendentes")
-def ordens_pendentes_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
+def ordens_pendentes_do_tecnico(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(exigir_mesmo_tecnico),
+):
     """O app do técnico chama isso após o login pra mostrar as OS que o
     admin atribuiu e que ainda não foram iniciadas (aguardando o técnico
     apertar 'Deslocamento')."""
@@ -1066,7 +1099,11 @@ def ordens_pendentes_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/tecnicos/{tecnico_id}/os-ativa")
-def os_ativa_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
+def os_ativa_do_tecnico(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(exigir_mesmo_tecnico),
+):
     """OS que o técnico já começou (deslocamento ou em_andamento) — usado
     pro app recuperar o estado certo se ele sair e entrar de novo."""
     ordem = db.query(models.OrdemServico).filter(
@@ -1332,7 +1369,11 @@ def criar_solicitacao(dados: SolicitacaoCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/tecnicos/{tecnico_id}/solicitacoes")
-def listar_solicitacoes_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
+def listar_solicitacoes_do_tecnico(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(exigir_mesmo_tecnico),
+):
     """Técnico acompanha o status dos pedidos que fez (pra ele saber se já
     foi aprovado, sem precisar perguntar pra ninguém)."""
     solicitacoes = db.query(models.SolicitacaoMaterial).filter_by(
@@ -1661,7 +1702,11 @@ def ver_foto_perfil(tecnico_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/tecnicos/{tecnico_id}/perfil", response_model=TecnicoOut)
-def ver_perfil_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
+def ver_perfil_tecnico(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(exigir_mesmo_tecnico),
+):
     """O próprio app do técnico usa isso pra mostrar a aba Perfil."""
     tecnico = db.query(models.Tecnico).get(tecnico_id)
     if not tecnico:
