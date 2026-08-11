@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 
 from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -201,6 +202,74 @@ def gerar_pdf_ordem(ordem: models.OrdemServico) -> str:
 
 
 # ---------- Schemas ----------
+
+
+# Autentica??o Bearer do aplicativo do t?cnico.
+bearer_tecnico = HTTPBearer(auto_error=False)
+
+
+def erro_autenticacao_tecnico(detail: str = "N?o autenticado"):
+    raise HTTPException(
+        status_code=401,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def obter_tecnico_atual(
+    credenciais: HTTPAuthorizationCredentials = Depends(bearer_tecnico),
+    db: Session = Depends(get_db),
+) -> models.Tecnico:
+
+    if credenciais is None:
+        erro_autenticacao_tecnico("Token de autentica??o ausente")
+
+    if credenciais.scheme.lower() != "bearer":
+        erro_autenticacao_tecnico("Tipo de autentica??o inv?lido")
+
+    try:
+        payload = jwt.decode(
+            credenciais.credentials,
+            JWT_SECRET_KEY,
+            algorithms=[JWT_ALGORITHM],
+        )
+
+    except jwt.ExpiredSignatureError:
+        erro_autenticacao_tecnico("Token expirado")
+
+    except jwt.InvalidTokenError:
+        erro_autenticacao_tecnico("Token inv?lido")
+
+    if payload.get("tipo") != "tecnico":
+        erro_autenticacao_tecnico("Token n?o pertence a um t?cnico")
+
+    tecnico_id = payload.get("sub")
+
+    try:
+        tecnico_id = int(tecnico_id)
+    except (TypeError, ValueError):
+        erro_autenticacao_tecnico("Token inv?lido")
+
+    tecnico = (
+        db.query(models.Tecnico)
+        .filter(
+            models.Tecnico.id == tecnico_id,
+            models.Tecnico.ativo == True,
+        )
+        .first()
+    )
+
+    if not tecnico:
+        erro_autenticacao_tecnico("T?cnico n?o encontrado ou inativo")
+
+    if not tecnico.aprovado:
+        raise HTTPException(
+            status_code=403,
+            detail="Cadastro aguardando aprova??o do estoque",
+        )
+
+    return tecnico
+
 
 class TecnicoLogin(BaseModel):
     login: str
@@ -446,6 +515,14 @@ def login(dados: TecnicoLogin, db: Session = Depends(get_db)):
         "access_token": criar_token_tecnico(tecnico),
         "token_type": "bearer",
     }
+
+
+
+@app.get("/tecnicos/me", response_model=TecnicoOut)
+def tecnico_me(
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual),
+):
+    return tecnico_atual
 
 
 # ---------- Materiais (catálogo / estoque central) ----------
