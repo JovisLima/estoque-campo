@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from fpdf import FPDF
 import bcrypt
+import jwt
 
 import models
 from database import Base, engine, get_db
@@ -42,6 +43,35 @@ app.add_middleware(
 # disso, todo controle de acesso é por login/senha individuais — veja
 # admin_usuarios no banco. Troque isso via variável de ambiente no VPS.
 ADMIN_SENHA_INICIAL = os.getenv("ADMIN_SENHA", "admin123")
+
+# JWT do aplicativo do t?cnico.
+# Desenvolvimento local: usa chave padr?o.
+# VPS: definir JWT_SECRET_KEY no ambiente.
+JWT_SECRET_KEY = os.getenv(
+    "JWT_SECRET_KEY",
+    "aven-local-development-change-in-vps"
+)
+
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "24"))
+
+
+def criar_token_tecnico(tecnico: models.Tecnico) -> str:
+    agora = datetime.utcnow()
+
+    payload = {
+        "sub": str(tecnico.id),
+        "tipo": "tecnico",
+        "iat": agora,
+        "exp": agora + timedelta(hours=JWT_EXPIRE_HOURS),
+    }
+
+    return jwt.encode(
+        payload,
+        JWT_SECRET_KEY,
+        algorithm=JWT_ALGORITHM,
+    )
+
 
 
 def obter_admin(
@@ -189,6 +219,11 @@ class TecnicoOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class TecnicoLoginOut(TecnicoOut):
+    access_token: str
+    token_type: str = "bearer"
 
 
 class MaterialOut(BaseModel):
@@ -393,7 +428,7 @@ class ResetarPin(BaseModel):
 
 # ---------- Auth simples por PIN ----------
 
-@app.post("/tecnicos/login", response_model=TecnicoOut)
+@app.post("/tecnicos/login", response_model=TecnicoLoginOut)
 def login(dados: TecnicoLogin, db: Session = Depends(get_db)):
     tecnico = db.query(models.Tecnico).filter(
         models.Tecnico.login == dados.login, models.Tecnico.ativo == True
@@ -402,7 +437,15 @@ def login(dados: TecnicoLogin, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Login ou PIN inválido")
     if not tecnico.aprovado:
         raise HTTPException(status_code=403, detail="Cadastro aguardando aprovação do estoque")
-    return tecnico
+    dados_tecnico = TecnicoOut.model_validate(
+        tecnico
+    ).model_dump()
+
+    return {
+        **dados_tecnico,
+        "access_token": criar_token_tecnico(tecnico),
+        "token_type": "bearer",
+    }
 
 
 # ---------- Materiais (catálogo / estoque central) ----------
