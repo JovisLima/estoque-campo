@@ -115,14 +115,81 @@ def criar_token_tecnico(tecnico: models.Tecnico) -> str:
 
 
 
+def criar_token_admin(admin: models.AdminUsuario) -> str:
+    agora = datetime.utcnow()
+
+    papel = (
+        admin.papel.value
+        if hasattr(admin.papel, "value")
+        else str(admin.papel)
+    )
+
+    payload = {
+        "sub": str(admin.id),
+        "tipo": "admin",
+        "papel": papel,
+        "iat": agora,
+        "exp": agora + timedelta(hours=JWT_EXPIRE_HOURS),
+    }
+
+    return jwt.encode(
+        payload,
+        JWT_SECRET_KEY,
+        algorithm=JWT_ALGORITHM,
+    )
+
+
+admin_bearer = HTTPBearer(auto_error=False)
+
 def obter_admin(
+    credenciais: Optional[HTTPAuthorizationCredentials] = Depends(admin_bearer),
     x_admin_login: str = Header(default=""),
     x_admin_senha: str = Header(default=""),
     db: Session = Depends(get_db),
 ):
-    admin = db.query(models.AdminUsuario).filter_by(login=x_admin_login, ativo=True).first()
-    if not admin or not bcrypt.checkpw(x_admin_senha.encode(), admin.senha_hash.encode()):
-        raise HTTPException(status_code=401, detail="Login ou senha de admin inválidos")
+    # Metodo novo: JWT administrativo.
+    if credenciais:
+        try:
+            payload = jwt.decode(
+                credenciais.credentials,
+                JWT_SECRET_KEY,
+                algorithms=[JWT_ALGORITHM],
+            )
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(status_code=401, detail="Token administrativo expirado")
+        except jwt.InvalidTokenError:
+            raise HTTPException(status_code=401, detail="Token administrativo invalido")
+
+        if payload.get("tipo") != "admin":
+            raise HTTPException(status_code=401, detail="Token nao pertence a um administrador")
+
+        try:
+            admin_id = int(payload.get("sub"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=401, detail="Token administrativo invalido")
+
+        admin = db.query(models.AdminUsuario).filter_by(
+            id=admin_id,
+            ativo=True,
+        ).first()
+
+        if not admin:
+            raise HTTPException(status_code=401, detail="Administrador nao encontrado ou desativado")
+
+        return admin
+
+    # Compatibilidade temporaria com o Desktop antigo.
+    admin = db.query(models.AdminUsuario).filter_by(
+        login=x_admin_login,
+        ativo=True,
+    ).first()
+
+    if not admin or not bcrypt.checkpw(
+        x_admin_senha.encode(),
+        admin.senha_hash.encode(),
+    ):
+        raise HTTPException(status_code=401, detail="Login ou senha de admin invalidos")
+
     return admin
 
 
@@ -450,6 +517,11 @@ class AdminUsuarioOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AdminLoginOut(AdminUsuarioOut):
+    access_token: str
+    token_type: str = "bearer"
 
 
 class AdminUsuarioCreate(BaseModel):
@@ -1648,11 +1720,34 @@ def admin_estoque_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
 
 # ---------- Painel Admin: login, técnicos, ordens, estoque geral ----------
 
-@app.post("/admin/login", response_model=AdminUsuarioOut)
+@app.post("/admin/login", response_model=AdminLoginOut)
 def admin_login(dados: AdminLogin, db: Session = Depends(get_db)):
-    admin = db.query(models.AdminUsuario).filter_by(login=dados.login, ativo=True).first()
-    if not admin or not bcrypt.checkpw(dados.senha.encode(), admin.senha_hash.encode()):
-        raise HTTPException(401, "Login ou senha inválidos")
+    admin = db.query(models.AdminUsuario).filter_by(
+        login=dados.login,
+        ativo=True,
+    ).first()
+
+    if not admin or not bcrypt.checkpw(
+        dados.senha.encode(),
+        admin.senha_hash.encode(),
+    ):
+        raise HTTPException(401, "Login ou senha inv?lidos")
+
+    return {
+        "id": admin.id,
+        "nome": admin.nome,
+        "login": admin.login,
+        "papel": admin.papel,
+        "ativo": admin.ativo,
+        "access_token": criar_token_admin(admin),
+        "token_type": "bearer",
+    }
+
+
+@app.get("/admin/me", response_model=AdminUsuarioOut)
+def admin_me(
+    admin: models.AdminUsuario = Depends(obter_admin),
+):
     return admin
 
 
