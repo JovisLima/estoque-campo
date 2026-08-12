@@ -143,52 +143,37 @@ admin_bearer = HTTPBearer(auto_error=False)
 
 def obter_admin(
     credenciais: Optional[HTTPAuthorizationCredentials] = Depends(admin_bearer),
-    x_admin_login: str = Header(default=""),
-    x_admin_senha: str = Header(default=""),
     db: Session = Depends(get_db),
 ):
-    # Metodo novo: JWT administrativo.
-    if credenciais:
-        try:
-            payload = jwt.decode(
-                credenciais.credentials,
-                JWT_SECRET_KEY,
-                algorithms=[JWT_ALGORITHM],
-            )
-        except jwt.ExpiredSignatureError:
-            raise HTTPException(status_code=401, detail="Token administrativo expirado")
-        except jwt.InvalidTokenError:
-            raise HTTPException(status_code=401, detail="Token administrativo invalido")
+    if not credenciais:
+        raise HTTPException(status_code=401, detail="Token administrativo obrigatorio")
 
-        if payload.get("tipo") != "admin":
-            raise HTTPException(status_code=401, detail="Token nao pertence a um administrador")
+    try:
+        payload = jwt.decode(
+            credenciais.credentials,
+            JWT_SECRET_KEY,
+            algorithms=[JWT_ALGORITHM],
+        )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token administrativo expirado")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Token administrativo invalido")
 
-        try:
-            admin_id = int(payload.get("sub"))
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=401, detail="Token administrativo invalido")
+    if payload.get("tipo") != "admin":
+        raise HTTPException(status_code=401, detail="Token nao pertence a um administrador")
 
-        admin = db.query(models.AdminUsuario).filter_by(
-            id=admin_id,
-            ativo=True,
-        ).first()
+    try:
+        admin_id = int(payload.get("sub"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=401, detail="Token administrativo invalido")
 
-        if not admin:
-            raise HTTPException(status_code=401, detail="Administrador nao encontrado ou desativado")
-
-        return admin
-
-    # Compatibilidade temporaria com o Desktop antigo.
     admin = db.query(models.AdminUsuario).filter_by(
-        login=x_admin_login,
+        id=admin_id,
         ativo=True,
     ).first()
 
-    if not admin or not bcrypt.checkpw(
-        x_admin_senha.encode(),
-        admin.senha_hash.encode(),
-    ):
-        raise HTTPException(status_code=401, detail="Login ou senha de admin invalidos")
+    if not admin:
+        raise HTTPException(status_code=401, detail="Administrador nao encontrado ou desativado")
 
     return admin
 
