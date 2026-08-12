@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import base64
 import uuid as uuid_lib
 from datetime import datetime, timedelta
@@ -30,6 +31,45 @@ os.makedirs(PASTA_RELATORIOS, exist_ok=True)
 os.makedirs(PASTA_FOTOS_PERFIL, exist_ok=True)
 os.makedirs(PASTA_ROTAS_CABO, exist_ok=True)
 os.makedirs(PASTA_FOTOS_OS, exist_ok=True)
+
+BASE_DIR = Path(__file__).resolve().parent
+
+PASTAS_ARQUIVOS = {
+    "fotos_perfil",
+    "rotas_cabo",
+    "fotos_os",
+    "relatorios",
+}
+
+
+def resolver_caminho_arquivo(caminho):
+    if not caminho:
+        return None
+
+    bruto = str(caminho)
+    caminho_obj = Path(bruto)
+
+    # Se o caminho cont?m uma das pastas gerenciadas pelo projeto,
+    # prioriza sempre a c?pia que est? dentro do backend atual.
+    partes = bruto.replace("\\", "/").split("/")
+
+    for indice, parte in enumerate(partes):
+        if parte in PASTAS_ARQUIVOS:
+            candidato_atual = BASE_DIR.joinpath(*partes[indice:])
+
+            if candidato_atual.exists():
+                return candidato_atual
+
+    # Novo formato relativo.
+    if not caminho_obj.is_absolute():
+        return BASE_DIR / caminho_obj
+
+    # Compatibilidade tempor?ria com caminho absoluto antigo,
+    # caso o arquivo ainda n?o tenha sido migrado para o projeto atual.
+    if caminho_obj.exists():
+        return caminho_obj
+
+    return caminho_obj
 
 # Em produção, restrinja para o domínio do seu app
 app.add_middleware(
@@ -182,7 +222,9 @@ def gerar_pdf_ordem(ordem: models.OrdemServico) -> str:
         x, y = 10, pdf.get_y()
         largura_foto = 90
         for i, foto in enumerate(ordem.fotos):
-            if not os.path.exists(foto.caminho):
+            caminho_foto = resolver_caminho_arquivo(foto.caminho)
+
+            if not caminho_foto or not caminho_foto.exists():
                 continue
             coluna = i % 2
             if coluna == 0 and i > 0:
@@ -192,13 +234,18 @@ def gerar_pdf_ordem(ordem: models.OrdemServico) -> str:
                 y = 20
             pos_x = 10 if coluna == 0 else 110
             try:
-                pdf.image(foto.caminho, x=pos_x, y=y, w=largura_foto)
+                pdf.image(str(caminho_foto), x=pos_x, y=y, w=largura_foto)
             except Exception:
                 pass
 
-    caminho = os.path.join(PASTA_RELATORIOS, f"os_{ordem.id}.pdf")
-    pdf.output(caminho)
-    return caminho
+    nome_arquivo = f"os_{ordem.id}.pdf"
+
+    caminho_absoluto = Path(PASTA_RELATORIOS) / nome_arquivo
+    caminho_relativo = Path("relatorios") / nome_arquivo
+
+    pdf.output(str(caminho_absoluto))
+
+    return caminho_relativo.as_posix()
 
 
 # ---------- Schemas ----------
@@ -950,16 +997,20 @@ def ver_rota_cabo(
         db,
     )
 
+    caminho_rota = resolver_caminho_arquivo(
+        cliente.imagem_rota_cabo
+    )
+
     if (
-        not cliente.imagem_rota_cabo
-        or not os.path.exists(cliente.imagem_rota_cabo)
+        not caminho_rota
+        or not caminho_rota.exists()
     ):
         raise HTTPException(
             status_code=404,
             detail="Sem imagem de rota cadastrada",
         )
 
-    return FileResponse(cliente.imagem_rota_cabo)
+    return FileResponse(str(caminho_rota))
 
 
 # ---------- Clientes (cadastro central, com foto da rota do cabo) ----------
@@ -984,11 +1035,17 @@ async def upload_rota_cabo(cliente_id: int, arquivo: UploadFile = File(...), db:
     if not cliente:
         raise HTTPException(404, "Cliente não encontrado")
     extensao = os.path.splitext(arquivo.filename or "rota.jpg")[1] or ".jpg"
-    caminho = os.path.join(PASTA_ROTAS_CABO, f"cliente_{cliente_id}{extensao}")
+    nome_arquivo = f"cliente_{cliente_id}{extensao}"
+
+    caminho_absoluto = Path(PASTA_ROTAS_CABO) / nome_arquivo
+    caminho_relativo = Path("rotas_cabo") / nome_arquivo
+
     conteudo = await arquivo.read()
-    with open(caminho, "wb") as f:
+
+    with open(caminho_absoluto, "wb") as f:
         f.write(conteudo)
-    cliente.imagem_rota_cabo = caminho
+
+    cliente.imagem_rota_cabo = caminho_relativo.as_posix()
     db.commit()
     return {"status": "ok"}
 
@@ -1303,11 +1360,18 @@ def anexar_foto_ordem(ordem_id: int, dados: FotoOrdemCreate, db: Session = Depen
         raise HTTPException(400, "Imagem em base64 inválida")
 
     nome_arquivo = f"os_{ordem_id}_{dados.client_uuid or uuid_lib.uuid4().hex}.jpg"
-    caminho = os.path.join(PASTA_FOTOS_OS, nome_arquivo)
-    with open(caminho, "wb") as f:
+
+    caminho_absoluto = Path(PASTA_FOTOS_OS) / nome_arquivo
+    caminho_relativo = Path("fotos_os") / nome_arquivo
+
+    with open(caminho_absoluto, "wb") as f:
         f.write(dados_binarios)
 
-    foto = models.FotoOrdem(ordem_id=ordem_id, caminho=caminho, client_uuid=dados.client_uuid)
+    foto = models.FotoOrdem(
+        ordem_id=ordem_id,
+        caminho=caminho_relativo.as_posix(),
+        client_uuid=dados.client_uuid,
+    )
     db.add(foto)
     try:
         db.commit()
@@ -1320,10 +1384,21 @@ def anexar_foto_ordem(ordem_id: int, dados: FotoOrdemCreate, db: Session = Depen
 
 @app.get("/admin/ordens/{ordem_id}/fotos/{foto_id}", dependencies=[Depends(exigir_papel())])
 def ver_foto_ordem(ordem_id: int, foto_id: int, db: Session = Depends(get_db)):
-    foto = db.query(models.FotoOrdem).filter_by(id=foto_id, ordem_id=ordem_id).first()
-    if not foto or not os.path.exists(foto.caminho):
-        raise HTTPException(404, "Foto não encontrada")
-    return FileResponse(foto.caminho)
+    foto = db.query(models.FotoOrdem).filter_by(
+        id=foto_id,
+        ordem_id=ordem_id,
+    ).first()
+
+    caminho_foto = (
+        resolver_caminho_arquivo(foto.caminho)
+        if foto
+        else None
+    )
+
+    if not foto or not caminho_foto or not caminho_foto.exists():
+        raise HTTPException(404, "Foto n?o encontrada")
+
+    return FileResponse(str(caminho_foto))
 
 
 @app.get("/ordens/{ordem_id}")
@@ -1782,11 +1857,17 @@ async def admin_upload_foto_perfil(tecnico_id: int, arquivo: UploadFile = File(.
     if not tecnico:
         raise HTTPException(404, "Técnico não encontrado")
     extensao = os.path.splitext(arquivo.filename or "foto.jpg")[1] or ".jpg"
-    caminho = os.path.join(PASTA_FOTOS_PERFIL, f"tecnico_{tecnico_id}{extensao}")
+    nome_arquivo = f"tecnico_{tecnico_id}{extensao}"
+
+    caminho_absoluto = Path(PASTA_FOTOS_PERFIL) / nome_arquivo
+    caminho_relativo = Path("fotos_perfil") / nome_arquivo
+
     conteudo = await arquivo.read()
-    with open(caminho, "wb") as f:
+
+    with open(caminho_absoluto, "wb") as f:
         f.write(conteudo)
-    tecnico.foto_perfil = caminho
+
+    tecnico.foto_perfil = caminho_relativo.as_posix()
     db.commit()
     return {"status": "ok"}
 
@@ -1801,17 +1882,23 @@ def ver_foto_perfil(
 ):
     tecnico = db.query(models.Tecnico).get(tecnico_id)
 
+    caminho_foto = (
+        resolver_caminho_arquivo(tecnico.foto_perfil)
+        if tecnico
+        else None
+    )
+
     if (
         not tecnico
-        or not tecnico.foto_perfil
-        or not os.path.exists(tecnico.foto_perfil)
+        or not caminho_foto
+        or not caminho_foto.exists()
     ):
         raise HTTPException(
             status_code=404,
             detail="Sem foto de perfil",
         )
 
-    return FileResponse(tecnico.foto_perfil)
+    return FileResponse(str(caminho_foto))
 
 
 @app.get(
@@ -1824,17 +1911,23 @@ def admin_ver_foto_perfil(
 ):
     tecnico = db.query(models.Tecnico).get(tecnico_id)
 
+    caminho_foto = (
+        resolver_caminho_arquivo(tecnico.foto_perfil)
+        if tecnico
+        else None
+    )
+
     if (
         not tecnico
-        or not tecnico.foto_perfil
-        or not os.path.exists(tecnico.foto_perfil)
+        or not caminho_foto
+        or not caminho_foto.exists()
     ):
         raise HTTPException(
             status_code=404,
             detail="Sem foto de perfil",
         )
 
-    return FileResponse(tecnico.foto_perfil)
+    return FileResponse(str(caminho_foto))
 
 
 @app.get("/tecnicos/{tecnico_id}/perfil", response_model=TecnicoOut)
@@ -1878,9 +1971,21 @@ def admin_atribuir_ordem(dados: OrdemAtribuir, db: Session = Depends(get_db)):
 @app.get("/admin/ordens/{ordem_id}/pdf", dependencies=[Depends(exigir_papel())])
 def baixar_pdf_ordem(ordem_id: int, db: Session = Depends(get_db)):
     ordem = db.query(models.OrdemServico).get(ordem_id)
-    if not ordem or not ordem.pdf_path or not os.path.exists(ordem.pdf_path):
-        raise HTTPException(404, "PDF não disponível pra essa OS")
-    return FileResponse(ordem.pdf_path, media_type="application/pdf", filename=f"OS_{ordem.id}.pdf")
+
+    caminho_pdf = (
+        resolver_caminho_arquivo(ordem.pdf_path)
+        if ordem and ordem.pdf_path
+        else None
+    )
+
+    if not ordem or not caminho_pdf or not caminho_pdf.exists():
+        raise HTTPException(404, "PDF n?o dispon?vel pra essa OS")
+
+    return FileResponse(
+        str(caminho_pdf),
+        media_type="application/pdf",
+        filename=f"OS_{ordem.id}.pdf",
+    )
 
 
 @app.get("/admin/ordens", dependencies=[Depends(exigir_papel())])
