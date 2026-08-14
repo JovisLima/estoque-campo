@@ -2,6 +2,17 @@
 <html lang="pt-br">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'self';
+  script-src 'self';
+  script-src-attr 'unsafe-inline';
+  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+  font-src 'self' https://fonts.gstatic.com;
+  img-src 'self' data: blob:;
+  connect-src 'self' http://localhost:8000 http://127.0.0.1:8000;
+  object-src 'none';
+  base-uri 'none';
+">
 <title>Aven Connect - Painel Admin</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -358,7 +369,7 @@
         <button class="secundario" onclick="filtrarOrdens('fechada')">Fechadas</button>
       </div>
       <table>
-        <thead><tr><th></th><th>ID</th><th>Origem</th><th>Cliente/Local</th><th>Tipo</th><th>Técnico</th><th>Status</th><th>Materiais usados</th><th>Fotos</th><th>Tempo</th><th>Relatório</th></tr></thead>
+        <thead><tr><th></th><th>ID</th><th>Origem</th><th>Cliente/Local</th><th>Tipo</th><th>Técnico</th><th>Status</th><th>Materiais usados</th><th>Fotos</th><th>Tempo</th><th>Acoes</th></tr></thead>
         <tbody id="tabela-ordens"></tbody>
       </table>
     </div>

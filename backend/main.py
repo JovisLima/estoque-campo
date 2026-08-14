@@ -1,17 +1,21 @@
 import os
+import secrets
+from pathlib import Path
 import base64
 import uuid as uuid_lib
 from datetime import datetime, timedelta
 from typing import Optional, List
 
-from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from fpdf import FPDF
 import bcrypt
+import jwt
 
 import models
 from database import Base, engine, get_db
@@ -29,6 +33,45 @@ os.makedirs(PASTA_FOTOS_PERFIL, exist_ok=True)
 os.makedirs(PASTA_ROTAS_CABO, exist_ok=True)
 os.makedirs(PASTA_FOTOS_OS, exist_ok=True)
 
+BASE_DIR = Path(__file__).resolve().parent
+
+PASTAS_ARQUIVOS = {
+    "fotos_perfil",
+    "rotas_cabo",
+    "fotos_os",
+    "relatorios",
+}
+
+
+def resolver_caminho_arquivo(caminho):
+    if not caminho:
+        return None
+
+    bruto = str(caminho)
+    caminho_obj = Path(bruto)
+
+    # Se o caminho cont?m uma das pastas gerenciadas pelo projeto,
+    # prioriza sempre a c?pia que est? dentro do backend atual.
+    partes = bruto.replace("\\", "/").split("/")
+
+    for indice, parte in enumerate(partes):
+        if parte in PASTAS_ARQUIVOS:
+            candidato_atual = BASE_DIR.joinpath(*partes[indice:])
+
+            if candidato_atual.exists():
+                return candidato_atual
+
+    # Novo formato relativo.
+    if not caminho_obj.is_absolute():
+        return BASE_DIR / caminho_obj
+
+    # Compatibilidade tempor?ria com caminho absoluto antigo,
+    # caso o arquivo ainda n?o tenha sido migrado para o projeto atual.
+    if caminho_obj.exists():
+        return caminho_obj
+
+    return caminho_obj
+
 # Em produção, restrinja para o domínio do seu app
 app.add_middleware(
     CORSMiddleware,
@@ -43,15 +86,134 @@ app.add_middleware(
 # admin_usuarios no banco. Troque isso via variável de ambiente no VPS.
 ADMIN_SENHA_INICIAL = os.getenv("ADMIN_SENHA", "admin123")
 
+# JWT do aplicativo do t?cnico.
+# Desenvolvimento local: usa chave padr?o.
+# VPS: definir JWT_SECRET_KEY no ambiente.
+JWT_SECRET_KEY = os.getenv(
+    "JWT_SECRET_KEY",
+    "aven-local-development-change-in-vps"
+)
+
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "24"))
+
+AVEN_MONITOR_API_TOKEN = os.getenv("AVEN_MONITOR_API_TOKEN")
+
+
+def criar_token_tecnico(tecnico: models.Tecnico) -> str:
+    agora = datetime.utcnow()
+
+    payload = {
+        "sub": str(tecnico.id),
+        "tipo": "tecnico",
+        "iat": agora,
+        "exp": agora + timedelta(hours=JWT_EXPIRE_HOURS),
+    }
+
+    return jwt.encode(
+        payload,
+        JWT_SECRET_KEY,
+        algorithm=JWT_ALGORITHM,
+    )
+
+
+
+def criar_token_admin(admin: models.AdminUsuario) -> str:
+    agora = datetime.utcnow()
+
+    papel = (
+        admin.papel.value
+        if hasattr(admin.papel, "value")
+        else str(admin.papel)
+    )
+
+    payload = {
+        "sub": str(admin.id),
+        "tipo": "admin",
+        "papel": papel,
+        "iat": agora,
+        "exp": agora + timedelta(hours=JWT_EXPIRE_HOURS),
+    }
+
+    return jwt.encode(
+        payload,
+        JWT_SECRET_KEY,
+        algorithm=JWT_ALGORITHM,
+    )
+
+
+monitor_bearer = HTTPBearer(auto_error=False)
+
+def exigir_aven_monitor(
+    credenciais: Optional[HTTPAuthorizationCredentials] = Depends(monitor_bearer),
+):
+    if not AVEN_MONITOR_API_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="Integracao AVEN Monitor nao configurada",
+        )
+
+    if credenciais is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Token do AVEN Monitor obrigatorio",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if credenciais.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=401,
+            detail="Tipo de autenticacao invalido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not secrets.compare_digest(
+        credenciais.credentials,
+        AVEN_MONITOR_API_TOKEN,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Token do AVEN Monitor invalido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+admin_bearer = HTTPBearer(auto_error=False)
 
 def obter_admin(
-    x_admin_login: str = Header(default=""),
-    x_admin_senha: str = Header(default=""),
+    credenciais: Optional[HTTPAuthorizationCredentials] = Depends(admin_bearer),
     db: Session = Depends(get_db),
 ):
-    admin = db.query(models.AdminUsuario).filter_by(login=x_admin_login, ativo=True).first()
-    if not admin or not bcrypt.checkpw(x_admin_senha.encode(), admin.senha_hash.encode()):
-        raise HTTPException(status_code=401, detail="Login ou senha de admin inválidos")
+    if not credenciais:
+        raise HTTPException(status_code=401, detail="Token administrativo obrigatorio")
+
+    try:
+        payload = jwt.decode(
+            credenciais.credentials,
+            JWT_SECRET_KEY,
+            algorithms=[JWT_ALGORITHM],
+        )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token administrativo expirado")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Token administrativo invalido")
+
+    if payload.get("tipo") != "admin":
+        raise HTTPException(status_code=401, detail="Token nao pertence a um administrador")
+
+    try:
+        admin_id = int(payload.get("sub"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=401, detail="Token administrativo invalido")
+
+    admin = db.query(models.AdminUsuario).filter_by(
+        id=admin_id,
+        ativo=True,
+    ).first()
+
+    if not admin:
+        raise HTTPException(status_code=401, detail="Administrador nao encontrado ou desativado")
+
     return admin
 
 
@@ -106,7 +268,7 @@ def gerar_pdf_ordem(ordem: models.OrdemServico) -> str:
         linha("Endereco", ordem.endereco)
     if ordem.prioridade:
         linha("Prioridade", "SIM - Atendimento prioritario")
-    linha("Tecnico", ordem.tecnico.nome)
+    linha("Tecnico", ordem.tecnico.nome if ordem.tecnico else "Nao atribuido")
     if ordem.lat_inicio and ordem.lon_inicio:
         linha("Local de inicio", f"{ordem.lat_inicio:.6f}, {ordem.lon_inicio:.6f}")
     if ordem.lat_fim and ordem.lon_fim:
@@ -151,7 +313,9 @@ def gerar_pdf_ordem(ordem: models.OrdemServico) -> str:
         x, y = 10, pdf.get_y()
         largura_foto = 90
         for i, foto in enumerate(ordem.fotos):
-            if not os.path.exists(foto.caminho):
+            caminho_foto = resolver_caminho_arquivo(foto.caminho)
+
+            if not caminho_foto or not caminho_foto.exists():
                 continue
             coluna = i % 2
             if coluna == 0 and i > 0:
@@ -161,16 +325,106 @@ def gerar_pdf_ordem(ordem: models.OrdemServico) -> str:
                 y = 20
             pos_x = 10 if coluna == 0 else 110
             try:
-                pdf.image(foto.caminho, x=pos_x, y=y, w=largura_foto)
+                pdf.image(str(caminho_foto), x=pos_x, y=y, w=largura_foto)
             except Exception:
                 pass
 
-    caminho = os.path.join(PASTA_RELATORIOS, f"os_{ordem.id}.pdf")
-    pdf.output(caminho)
-    return caminho
+    nome_arquivo = f"os_{ordem.id}.pdf"
+
+    caminho_absoluto = Path(PASTA_RELATORIOS) / nome_arquivo
+    caminho_relativo = Path("relatorios") / nome_arquivo
+
+    pdf.output(str(caminho_absoluto))
+
+    return caminho_relativo.as_posix()
 
 
 # ---------- Schemas ----------
+
+
+# Autentica??o Bearer do aplicativo do t?cnico.
+bearer_tecnico = HTTPBearer(auto_error=False)
+
+
+def erro_autenticacao_tecnico(detail: str = "N?o autenticado"):
+    raise HTTPException(
+        status_code=401,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def obter_tecnico_atual(
+    credenciais: HTTPAuthorizationCredentials = Depends(bearer_tecnico),
+    db: Session = Depends(get_db),
+) -> models.Tecnico:
+
+    if credenciais is None:
+        erro_autenticacao_tecnico("Token de autentica??o ausente")
+
+    if credenciais.scheme.lower() != "bearer":
+        erro_autenticacao_tecnico("Tipo de autentica??o inv?lido")
+
+    try:
+        payload = jwt.decode(
+            credenciais.credentials,
+            JWT_SECRET_KEY,
+            algorithms=[JWT_ALGORITHM],
+        )
+
+    except jwt.ExpiredSignatureError:
+        erro_autenticacao_tecnico("Token expirado")
+
+    except jwt.InvalidTokenError:
+        erro_autenticacao_tecnico("Token inv?lido")
+
+    if payload.get("tipo") != "tecnico":
+        erro_autenticacao_tecnico("Token n?o pertence a um t?cnico")
+
+    tecnico_id = payload.get("sub")
+
+    try:
+        tecnico_id = int(tecnico_id)
+    except (TypeError, ValueError):
+        erro_autenticacao_tecnico("Token inv?lido")
+
+    tecnico = (
+        db.query(models.Tecnico)
+        .filter(
+            models.Tecnico.id == tecnico_id,
+            models.Tecnico.ativo == True,
+        )
+        .first()
+    )
+
+    if not tecnico:
+        erro_autenticacao_tecnico("T?cnico n?o encontrado ou inativo")
+
+    if not tecnico.aprovado:
+        raise HTTPException(
+            status_code=403,
+            detail="Cadastro aguardando aprova??o do estoque",
+        )
+
+    return tecnico
+
+
+
+def exigir_mesmo_tecnico(
+    tecnico_id: int,
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual),
+) -> models.Tecnico:
+    """
+    Garante que o ID solicitado na URL pertence ao t?cnico autenticado.
+    """
+    if tecnico_atual.id != tecnico_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Voc? n?o tem permiss?o para acessar dados de outro t?cnico",
+        )
+
+    return tecnico_atual
+
 
 class TecnicoLogin(BaseModel):
     login: str
@@ -189,6 +443,11 @@ class TecnicoOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class TecnicoLoginOut(TecnicoOut):
+    access_token: str
+    token_type: str = "bearer"
 
 
 class MaterialOut(BaseModel):
@@ -228,6 +487,80 @@ class OrdemCreate(BaseModel):
     client_uuid: Optional[str] = None  # gerado no celular p/ evitar duplicidade ao sincronizar
 
 
+class MonitorIncidenteCreate(BaseModel):
+    tipo: str
+    dispositivo_id: str
+    codigo: str
+    local: str
+    cidade: str
+    fabricante: str
+    inicio: datetime
+
+    equipamento: Optional[str] = None
+    link: Optional[str] = None
+    operadora: Optional[str] = None
+    papel: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validar_tipo_incidente(self):
+        if self.tipo == "LINK":
+            if not self.link:
+                raise ValueError(
+                    "Incidente LINK exige link"
+                )
+
+            if not self.operadora:
+                raise ValueError(
+                    "Incidente LINK exige operadora"
+                )
+
+            if not self.papel:
+                raise ValueError(
+                    "Incidente LINK exige papel"
+                )
+
+        elif self.tipo == "DISPOSITIVO":
+            if not self.equipamento:
+                raise ValueError(
+                    "Incidente DISPOSITIVO exige equipamento"
+                )
+
+        else:
+            raise ValueError(
+                "tipo deve ser LINK ou DISPOSITIVO"
+            )
+
+        return self
+
+
+def gerar_client_uuid_monitor(
+    dados: MonitorIncidenteCreate,
+) -> str:
+    partes = [
+        "AVEN_MONITOR",
+        dados.tipo,
+        dados.dispositivo_id,
+    ]
+
+    if dados.tipo == "LINK":
+        partes.append(dados.link)
+
+    partes.append(
+        dados.inicio.isoformat(
+            timespec="seconds"
+        )
+    )
+
+    chave = "|".join(partes)
+
+    identificador = uuid_lib.uuid5(
+        uuid_lib.NAMESPACE_URL,
+        chave,
+    )
+
+    return f"monitor:{identificador}"
+
+
 class OrdemOut(BaseModel):
     id: int
     tipo: str
@@ -237,7 +570,7 @@ class OrdemOut(BaseModel):
     endereco: Optional[str] = None
     prioridade: bool = False
     status: str
-    tecnico_id: int
+    tecnico_id: Optional[int] = None
     data_abertura: datetime
 
     class Config:
@@ -253,6 +586,10 @@ class OrdemAtribuir(BaseModel):
     endereco: Optional[str] = None
     prioridade: bool = False
     observacoes: Optional[str] = None
+
+
+class OrdemAtribuirExistente(BaseModel):
+    tecnico_id: int
 
 
 class TecnicoCreate(BaseModel):
@@ -284,6 +621,11 @@ class AdminUsuarioOut(BaseModel):
         from_attributes = True
 
 
+class AdminLoginOut(AdminUsuarioOut):
+    access_token: str
+    token_type: str = "bearer"
+
+
 class AdminUsuarioCreate(BaseModel):
     nome: str
     login: str
@@ -302,7 +644,7 @@ class AdminUsuarioAtivo(BaseModel):
 class MovimentacaoCreate(BaseModel):
     ordem_id: int
     material_id: int
-    quantidade: float
+    quantidade: float = Field(gt=0)
     client_uuid: Optional[str] = None
 
 
@@ -310,9 +652,9 @@ class MaterialCreate(BaseModel):
     nome: str
     categoria: Optional[str] = None
     unidade: str = "un"
-    qtd_atual: float = 0
-    qtd_minima: float = 0
-    custo_unitario: float = 0
+    qtd_atual: float = Field(default=0, ge=0)
+    qtd_minima: float = Field(default=0, ge=0)
+    custo_unitario: float = Field(default=0, ge=0)
 
 
 class FerramentaCreate(BaseModel):
@@ -323,21 +665,21 @@ class FerramentaCreate(BaseModel):
 
 class EntradaEstoque(BaseModel):
     material_id: int
-    quantidade: float
+    quantidade: float = Field(gt=0)
 
 
 class TransferenciaCreate(BaseModel):
     tecnico_id: int
     tipo: str  # "material" | "ferramenta"
     material_id: Optional[int] = None
-    quantidade: Optional[float] = None
+    quantidade: Optional[float] = Field(default=None, gt=0)
     ferramenta_id: Optional[int] = None
 
 
 class SolicitacaoCreate(BaseModel):
     tecnico_id: int
     material_id: int
-    quantidade: float
+    quantidade: float = Field(gt=0)
     observacao: Optional[str] = None
     client_uuid: Optional[str] = None
 
@@ -393,7 +735,7 @@ class ResetarPin(BaseModel):
 
 # ---------- Auth simples por PIN ----------
 
-@app.post("/tecnicos/login", response_model=TecnicoOut)
+@app.post("/tecnicos/login", response_model=TecnicoLoginOut)
 def login(dados: TecnicoLogin, db: Session = Depends(get_db)):
     tecnico = db.query(models.Tecnico).filter(
         models.Tecnico.login == dados.login, models.Tecnico.ativo == True
@@ -402,17 +744,40 @@ def login(dados: TecnicoLogin, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Login ou PIN inválido")
     if not tecnico.aprovado:
         raise HTTPException(status_code=403, detail="Cadastro aguardando aprovação do estoque")
-    return tecnico
+    dados_tecnico = TecnicoOut.model_validate(
+        tecnico
+    ).model_dump()
+
+    return {
+        **dados_tecnico,
+        "access_token": criar_token_tecnico(tecnico),
+        "token_type": "bearer",
+    }
+
+
+
+@app.get("/tecnicos/me", response_model=TecnicoOut)
+def tecnico_me(
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual),
+):
+    return tecnico_atual
 
 
 # ---------- Materiais (catálogo / estoque central) ----------
 
 @app.get("/materiais", response_model=List[MaterialOut])
-def listar_materiais(db: Session = Depends(get_db)):
+def listar_materiais(
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual),
+):
     return db.query(models.Material).order_by(models.Material.nome).all()
 
 
-@app.get("/materiais/baixo-estoque", response_model=List[MaterialOut])
+@app.get(
+    "/materiais/baixo-estoque",
+    response_model=List[MaterialOut],
+    dependencies=[Depends(exigir_papel())],
+)
 def materiais_baixo_estoque(db: Session = Depends(get_db)):
     materiais = db.query(models.Material).all()
     return [m for m in materiais if m.qtd_atual <= m.qtd_minima]
@@ -446,7 +811,11 @@ def registrar_entrada(dados: EntradaEstoque, db: Session = Depends(get_db)):
 
 # ---------- Ferramentas / EPIs (catálogo central) ----------
 
-@app.get("/ferramentas", response_model=List[FerramentaOut])
+@app.get(
+    "/ferramentas",
+    response_model=List[FerramentaOut],
+    dependencies=[Depends(exigir_papel())],
+)
 def listar_ferramentas(db: Session = Depends(get_db)):
     return db.query(models.Ferramenta).order_by(models.Ferramenta.nome).all()
 
@@ -498,12 +867,25 @@ def enviar_ferramenta_manutencao(ferramenta_id: int, db: Session = Depends(get_d
 # ---------- Avisos de problema (técnico notifica, admin resolve) ----------
 
 @app.post("/ferramentas/avisos")
-def criar_aviso(dados: AvisoCreate, db: Session = Depends(get_db)):
+def criar_aviso(dados: AvisoCreate, db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual)):
     """Técnico avisa que uma ferramenta/EPI que está com ele quebrou ou
     gastou. Não muda o estoque sozinho — só o admin resolve isso."""
     ferramenta = db.query(models.Ferramenta).get(dados.ferramenta_id)
     if not ferramenta:
         raise HTTPException(404, "Ferramenta não encontrada")
+
+    if dados.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Nao e permitido criar aviso em nome de outro tecnico",
+        )
+
+    if ferramenta.tecnico_atual_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta ferramenta nao pertence ao tecnico autenticado",
+        )
     aviso = models.AvisoFerramenta(
         ferramenta_id=dados.ferramenta_id, tecnico_id=dados.tecnico_id,
         descricao=dados.descricao,
@@ -615,7 +997,11 @@ def listar_transferencias(status: Optional[str] = None, db: Session = Depends(ge
 
 
 @app.get("/tecnicos/{tecnico_id}/transferencias-pendentes")
-def transferencias_pendentes_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
+def transferencias_pendentes_do_tecnico(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(exigir_mesmo_tecnico),
+):
     """App do técnico chama isso pra mostrar o que precisa confirmar recebimento."""
     transferencias = db.query(models.Transferencia).filter_by(
         tecnico_id=tecnico_id, status=models.StatusTransferencia.pendente
@@ -633,10 +1019,17 @@ def transferencias_pendentes_do_tecnico(tecnico_id: int, db: Session = Depends(g
 
 
 @app.post("/transferencias/{transferencia_id}/confirmar")
-def confirmar_transferencia(transferencia_id: int, db: Session = Depends(get_db)):
+def confirmar_transferencia(transferencia_id: int, db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual)):
     t = db.query(models.Transferencia).get(transferencia_id)
     if not t:
         raise HTTPException(404, "Transferência não encontrada")
+
+    if t.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta transfer?ncia pertence a outro t?cnico",
+        )
     if t.status != models.StatusTransferencia.pendente:
         return {"status": "já processada"}
 
@@ -662,10 +1055,17 @@ def confirmar_transferencia(transferencia_id: int, db: Session = Depends(get_db)
 
 
 @app.post("/transferencias/{transferencia_id}/recusar")
-def recusar_transferencia(transferencia_id: int, db: Session = Depends(get_db)):
+def recusar_transferencia(transferencia_id: int, db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual)):
     t = db.query(models.Transferencia).get(transferencia_id)
     if not t:
         raise HTTPException(404, "Transferência não encontrada")
+
+    if t.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta transfer?ncia pertence a outro t?cnico",
+        )
     if t.status != models.StatusTransferencia.pendente:
         return {"status": "já processada"}
 
@@ -683,7 +1083,11 @@ def recusar_transferencia(transferencia_id: int, db: Session = Depends(get_db)):
 # ---------- Estoque pessoal e ferramentas do técnico (consulta) ----------
 
 @app.get("/tecnicos/{tecnico_id}/estoque-pessoal")
-def estoque_pessoal_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
+def estoque_pessoal_do_tecnico(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(exigir_mesmo_tecnico),
+):
     itens = db.query(models.EstoquePessoal).filter_by(tecnico_id=tecnico_id).all()
     return [
         {
@@ -695,7 +1099,11 @@ def estoque_pessoal_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/tecnicos/{tecnico_id}/ferramentas")
-def ferramentas_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
+def ferramentas_do_tecnico(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(exigir_mesmo_tecnico),
+):
     ferramentas = db.query(models.Ferramenta).filter_by(
         tecnico_atual_id=tecnico_id, status=models.StatusFerramenta.com_tecnico
     ).all()
@@ -704,80 +1112,79 @@ def ferramentas_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
     ]
 
 
-# ---------- Clientes (cadastro + foto da rota do cabo) ----------
+# ---------- Acesso do tecnico aos clientes ----------
 
-@app.get("/admin/clientes", response_model=List[ClienteOut], dependencies=[Depends(exigir_papel())])
-def listar_clientes(db: Session = Depends(get_db)):
-    return db.query(models.Cliente).order_by(models.Cliente.nome).all()
+def obter_cliente_do_tecnico(
+    cliente_id: int,
+    tecnico_atual: models.Tecnico,
+    db: Session,
+) -> models.Cliente:
 
+    cliente = db.query(models.Cliente).get(cliente_id)
 
-@app.post("/admin/clientes", response_model=ClienteOut, dependencies=[Depends(exigir_papel())])
-def criar_cliente(dados: ClienteCreate, db: Session = Depends(get_db)):
-    cliente = models.Cliente(**dados.model_dump())
-    db.add(cliente)
-    db.commit()
-    db.refresh(cliente)
+    if not cliente:
+        raise HTTPException(
+            status_code=404,
+            detail="Cliente nao encontrado",
+        )
+
+    vinculo = (
+        db.query(models.OrdemServico.id)
+        .filter(
+            models.OrdemServico.cliente_id == cliente_id,
+            models.OrdemServico.tecnico_id == tecnico_atual.id,
+        )
+        .first()
+    )
+
+    if not vinculo:
+        raise HTTPException(
+            status_code=403,
+            detail="Este cliente nao pertence a uma OS do tecnico autenticado",
+        )
+
     return cliente
 
 
-@app.post("/admin/clientes/{cliente_id}/rota-cabo", dependencies=[Depends(exigir_papel())])
-async def upload_rota_cabo(cliente_id: int, arquivo: UploadFile = File(...), db: Session = Depends(get_db)):
-    cliente = db.query(models.Cliente).get(cliente_id)
-    if not cliente:
-        raise HTTPException(404, "Cliente não encontrado")
-    extensao = os.path.splitext(arquivo.filename or "rota.jpg")[1] or ".jpg"
-    caminho = os.path.join(PASTA_ROTAS_CABO, f"cliente_{cliente_id}{extensao}")
-    conteudo = await arquivo.read()
-    with open(caminho, "wb") as f:
-        f.write(conteudo)
-    cliente.imagem_rota_cabo = caminho
-    db.commit()
-    return {"status": "ok"}
-
-
-@app.get("/clientes/{cliente_id}")
-def ver_cliente(cliente_id: int, db: Session = Depends(get_db)):
-    """Endpoint público (sem senha de admin) — o app do técnico usa isso
-    pra saber se tem imagem da rota do cabo antes de exibir o botão."""
-    cliente = db.query(models.Cliente).get(cliente_id)
-    if not cliente:
-        raise HTTPException(404, "Cliente não encontrado")
-    return {
-        "id": cliente.id, "nome": cliente.nome, "endereco": cliente.endereco,
-        "observacoes": cliente.observacoes, "tem_imagem_rota": cliente.tem_imagem_rota,
-    }
+@app.get("/clientes/{cliente_id}", response_model=ClienteOut)
+def ver_cliente(
+    cliente_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual),
+):
+    return obter_cliente_do_tecnico(
+        cliente_id,
+        tecnico_atual,
+        db,
+    )
 
 
 @app.get("/clientes/{cliente_id}/rota-cabo")
-def ver_imagem_rota_cabo(cliente_id: int, db: Session = Depends(get_db)):
-    """Também público — é só uma foto de referência pro técnico em campo."""
-    cliente = db.query(models.Cliente).get(cliente_id)
-    if not cliente or not cliente.imagem_rota_cabo or not os.path.exists(cliente.imagem_rota_cabo):
-        raise HTTPException(404, "Sem imagem de rota do cabo")
-    return FileResponse(cliente.imagem_rota_cabo)
+def ver_rota_cabo(
+    cliente_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual),
+):
+    cliente = obter_cliente_do_tecnico(
+        cliente_id,
+        tecnico_atual,
+        db,
+    )
 
+    caminho_rota = resolver_caminho_arquivo(
+        cliente.imagem_rota_cabo
+    )
 
-@app.get("/admin/clientes/{cliente_id}/historico", dependencies=[Depends(exigir_papel())])
-def historico_cliente(cliente_id: int, db: Session = Depends(get_db)):
-    """Todas as OS já feitas nesse cliente — ajuda a enxergar problemas
-    recorrentes no mesmo local."""
-    cliente = db.query(models.Cliente).get(cliente_id)
-    if not cliente:
-        raise HTTPException(404, "Cliente não encontrado")
-    ordens = db.query(models.OrdemServico).filter_by(cliente_id=cliente_id).order_by(
-        models.OrdemServico.data_abertura.desc()
-    ).all()
-    return {
-        "cliente": cliente.nome,
-        "ordens": [
-            {
-                "id": o.id, "tipo": o.tipo, "status": o.status, "tecnico": o.tecnico.nome,
-                "data_abertura": o.data_abertura, "data_fechamento": o.data_fechamento,
-                "prioridade": o.prioridade,
-            }
-            for o in ordens
-        ],
-    }
+    if (
+        not caminho_rota
+        or not caminho_rota.exists()
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Sem imagem de rota cadastrada",
+        )
+
+    return FileResponse(str(caminho_rota))
 
 
 # ---------- Clientes (cadastro central, com foto da rota do cabo) ----------
@@ -802,33 +1209,19 @@ async def upload_rota_cabo(cliente_id: int, arquivo: UploadFile = File(...), db:
     if not cliente:
         raise HTTPException(404, "Cliente não encontrado")
     extensao = os.path.splitext(arquivo.filename or "rota.jpg")[1] or ".jpg"
-    caminho = os.path.join(PASTA_ROTAS_CABO, f"cliente_{cliente_id}{extensao}")
+    nome_arquivo = f"cliente_{cliente_id}{extensao}"
+
+    caminho_absoluto = Path(PASTA_ROTAS_CABO) / nome_arquivo
+    caminho_relativo = Path("rotas_cabo") / nome_arquivo
+
     conteudo = await arquivo.read()
-    with open(caminho, "wb") as f:
+
+    with open(caminho_absoluto, "wb") as f:
         f.write(conteudo)
-    cliente.imagem_rota_cabo = caminho
+
+    cliente.imagem_rota_cabo = caminho_relativo.as_posix()
     db.commit()
     return {"status": "ok"}
-
-
-@app.get("/clientes/{cliente_id}/rota-cabo")
-def ver_rota_cabo(cliente_id: int, db: Session = Depends(get_db)):
-    """Sem exigir login de admin — o app do técnico também precisa ver essa
-    imagem quando estiver atendendo uma OS vinculada a esse cliente."""
-    cliente = db.query(models.Cliente).get(cliente_id)
-    if not cliente or not cliente.imagem_rota_cabo or not os.path.exists(cliente.imagem_rota_cabo):
-        raise HTTPException(404, "Sem imagem de rota cadastrada")
-    return FileResponse(cliente.imagem_rota_cabo)
-
-
-@app.get("/clientes/{cliente_id}", response_model=ClienteOut)
-def ver_cliente(cliente_id: int, db: Session = Depends(get_db)):
-    """Público (sem senha de admin) — usado pelo app do técnico pra saber
-    se o cliente da OS atual tem imagem de rota de cabo cadastrada."""
-    cliente = db.query(models.Cliente).get(cliente_id)
-    if not cliente:
-        raise HTTPException(404, "Cliente não encontrado")
-    return cliente
 
 
 @app.get("/admin/clientes/{cliente_id}/historico", dependencies=[Depends(exigir_papel())])
@@ -845,7 +1238,7 @@ def historico_cliente(cliente_id: int, db: Session = Depends(get_db)):
         "cliente": cliente.nome,
         "ordens": [
             {
-                "id": o.id, "tipo": o.tipo, "status": o.status, "tecnico": o.tecnico.nome,
+                "id": o.id, "tipo": o.tipo, "status": o.status, "tecnico": o.tecnico.nome if o.tecnico else "Nao atribuido",
                 "data_abertura": o.data_abertura, "data_fechamento": o.data_fechamento,
             }
             for o in ordens
@@ -890,44 +1283,155 @@ def sugestao_compra(db: Session = Depends(get_db)):
 # ---------- Ordens de Serviço ----------
 
 @app.post("/ordens", response_model=OrdemOut)
-def criar_ordem(dados: OrdemCreate, db: Session = Depends(get_db)):
-    # se o técnico reenviar (ex: sincronização offline duplicada), retorna a existente
+def criar_ordem(
+    dados: OrdemCreate,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual),
+):
+    # O tecnico informado no JSON precisa ser o mesmo do JWT.
+    if dados.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Nao e permitido abrir OS em nome de outro tecnico",
+        )
+
+    # Reenvio offline/idempotencia.
     if dados.client_uuid:
         existente = db.query(models.OrdemServico).filter_by(
             client_uuid=dados.client_uuid
         ).first()
+
         if existente:
+            if existente.tecnico_id != tecnico_atual.id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="OS existente pertence a outro tecnico",
+                )
+
             return existente
 
-    # OS avulsa (criada pelo próprio técnico, sem passar pelo admin) só é
-    # permitida pra técnicos marcados como ADM
-    tecnico = db.query(models.Tecnico).get(dados.tecnico_id)
-    if not tecnico:
-        raise HTTPException(404, "Técnico não encontrado")
-    if not tecnico.is_adm:
-        raise HTTPException(403, "Apenas técnicos ADM podem abrir OS avulsa")
+    # OS avulsa continua restrita a tecnico ADM.
+    if not tecnico_atual.is_adm:
+        raise HTTPException(
+            status_code=403,
+            detail="Apenas tecnicos ADM podem abrir OS avulsa",
+        )
 
-    # técnico já decidiu ir até o local ao criar a OS avulsa, então ela
-    # nasce direto em "deslocamento" (pula o estágio "pendente")
     dados_ordem = dados.model_dump()
     lat = dados_ordem.pop("lat")
     lon = dados_ordem.pop("lon")
+
     ordem = models.OrdemServico(
-        **dados_ordem, status=models.StatusOS.deslocamento,
-        data_deslocamento=datetime.utcnow(), lat_deslocamento=lat, lon_deslocamento=lon,
+        **dados_ordem,
+        status=models.StatusOS.deslocamento,
+        data_deslocamento=datetime.utcnow(),
+        lat_deslocamento=lat,
+        lon_deslocamento=lon,
     )
+
     db.add(ordem)
+
     try:
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(409, "Ordem já registrada (client_uuid duplicado)")
+        raise HTTPException(
+            status_code=409,
+            detail="Ordem ja registrada (client_uuid duplicado)",
+        )
+
     db.refresh(ordem)
     return ordem
 
 
+@app.post(
+    "/integracoes/aven-monitor/incidentes",
+    response_model=OrdemOut,
+    dependencies=[Depends(exigir_aven_monitor)],
+)
+def criar_ordem_incidente_monitor(
+    dados: MonitorIncidenteCreate,
+    db: Session = Depends(get_db),
+):
+    client_uuid = gerar_client_uuid_monitor(dados)
+
+    existente = db.query(
+        models.OrdemServico
+    ).filter_by(
+        client_uuid=client_uuid
+    ).first()
+
+    if existente:
+        return existente
+
+    observacoes = [
+        "OS criada automaticamente pelo AVEN Monitor.",
+        f"Tipo de incidente: {dados.tipo}",
+        f"Dispositivo: {dados.codigo}",
+        f"Local: {dados.local}",
+        f"Cidade: {dados.cidade}",
+        f"Fabricante: {dados.fabricante}",
+        f"Inicio observado: {dados.inicio.isoformat(timespec='seconds')}",
+    ]
+
+    if dados.tipo == "LINK":
+        observacoes.extend([
+            f"Link: {dados.link}",
+            f"Operadora: {dados.operadora}",
+            f"Papel: {dados.papel}",
+        ])
+    else:
+        observacoes.append(
+            f"Equipamento: {dados.equipamento}"
+        )
+
+    ordem = models.OrdemServico(
+        tecnico_id=None,
+        cliente_id=None,
+        tipo=models.TipoOS.manutencao,
+        cliente_local=dados.local,
+        nome_cliente=None,
+        endereco=None,
+        prioridade=False,
+        observacoes="\n".join(observacoes),
+        status=models.StatusOS.pendente,
+        criada_por_admin=False,
+        client_uuid=client_uuid,
+    )
+
+    db.add(ordem)
+
+    try:
+        db.commit()
+
+    except IntegrityError:
+        db.rollback()
+
+        existente = db.query(
+            models.OrdemServico
+        ).filter_by(
+            client_uuid=client_uuid
+        ).first()
+
+        if existente:
+            return existente
+
+        raise HTTPException(
+            status_code=409,
+            detail="Falha de idempotencia ao registrar incidente",
+        )
+
+    db.refresh(ordem)
+
+    return ordem
+
+
 @app.get("/tecnicos/{tecnico_id}/ordens-pendentes")
-def ordens_pendentes_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
+def ordens_pendentes_do_tecnico(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(exigir_mesmo_tecnico),
+):
     """O app do técnico chama isso após o login pra mostrar as OS que o
     admin atribuiu e que ainda não foram iniciadas (aguardando o técnico
     apertar 'Deslocamento')."""
@@ -946,7 +1450,11 @@ def ordens_pendentes_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/tecnicos/{tecnico_id}/os-ativa")
-def os_ativa_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
+def os_ativa_do_tecnico(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(exigir_mesmo_tecnico),
+):
     """OS que o técnico já começou (deslocamento ou em_andamento) — usado
     pro app recuperar o estado certo se ele sair e entrar de novo."""
     ordem = db.query(models.OrdemServico).filter(
@@ -964,11 +1472,17 @@ def os_ativa_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/ordens/{ordem_id}/deslocamento", response_model=OrdemOut)
-def iniciar_deslocamento(ordem_id: int, dados: LocalizacaoOpcional = LocalizacaoOpcional(), db: Session = Depends(get_db)):
+def iniciar_deslocamento(ordem_id: int, dados: LocalizacaoOpcional = LocalizacaoOpcional(), db: Session = Depends(get_db), tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual)):
     """Técnico apertou 'Deslocamento' — está a caminho do local."""
     ordem = db.query(models.OrdemServico).get(ordem_id)
     if not ordem:
         raise HTTPException(404, "Ordem não encontrada")
+
+    if ordem.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta OS pertence a outro tecnico",
+        )
     if ordem.status != models.StatusOS.pendente:
         raise HTTPException(400, "Esta OS não está pendente")
     ordem.status = models.StatusOS.deslocamento
@@ -981,11 +1495,17 @@ def iniciar_deslocamento(ordem_id: int, dados: LocalizacaoOpcional = Localizacao
 
 
 @app.post("/ordens/{ordem_id}/iniciar", response_model=OrdemOut)
-def iniciar_ordem(ordem_id: int, dados: LocalizacaoOpcional = LocalizacaoOpcional(), db: Session = Depends(get_db)):
+def iniciar_ordem(ordem_id: int, dados: LocalizacaoOpcional = LocalizacaoOpcional(), db: Session = Depends(get_db), tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual)):
     """Técnico chegou no local e apertou 'Iniciar atendimento'."""
     ordem = db.query(models.OrdemServico).get(ordem_id)
     if not ordem:
         raise HTTPException(404, "Ordem não encontrada")
+
+    if ordem.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta OS pertence a outro tecnico",
+        )
     if ordem.status not in (models.StatusOS.pendente, models.StatusOS.deslocamento):
         raise HTTPException(400, "Esta OS não pode ser iniciada nesse estado")
     ordem.status = models.StatusOS.em_andamento
@@ -1036,10 +1556,16 @@ def verificar_manutencao_preventiva(ordem: models.OrdemServico, db: Session):
 
 
 @app.post("/ordens/{ordem_id}/fechar")
-def fechar_ordem(ordem_id: int, dados: FecharOrdemBody = FecharOrdemBody(), db: Session = Depends(get_db)):
+def fechar_ordem(ordem_id: int, dados: FecharOrdemBody = FecharOrdemBody(), db: Session = Depends(get_db), tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual)):
     ordem = db.query(models.OrdemServico).get(ordem_id)
     if not ordem:
         raise HTTPException(404, "Ordem não encontrada")
+
+    if ordem.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta OS pertence a outro tecnico",
+        )
     ordem.status = models.StatusOS.fechada
     ordem.data_fechamento = datetime.utcnow()
     ordem.lat_fim = dados.lat
@@ -1065,7 +1591,8 @@ def fechar_ordem(ordem_id: int, dados: FecharOrdemBody = FecharOrdemBody(), db: 
 
 
 @app.post("/ordens/{ordem_id}/fotos")
-def anexar_foto_ordem(ordem_id: int, dados: FotoOrdemCreate, db: Session = Depends(get_db)):
+def anexar_foto_ordem(ordem_id: int, dados: FotoOrdemCreate, db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual)):
     """Técnico anexa uma foto (base64) tirada durante a OS. Funciona com a
     fila offline do app — a foto fica pendente até sincronizar."""
     if dados.client_uuid:
@@ -1077,17 +1604,30 @@ def anexar_foto_ordem(ordem_id: int, dados: FotoOrdemCreate, db: Session = Depen
     if not ordem:
         raise HTTPException(404, "Ordem não encontrada")
 
+
+    if ordem.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta OS pertence a outro tecnico",
+        )
     try:
         dados_binarios = base64.b64decode(dados.imagem_base64.split(",")[-1])
     except Exception:
         raise HTTPException(400, "Imagem em base64 inválida")
 
     nome_arquivo = f"os_{ordem_id}_{dados.client_uuid or uuid_lib.uuid4().hex}.jpg"
-    caminho = os.path.join(PASTA_FOTOS_OS, nome_arquivo)
-    with open(caminho, "wb") as f:
+
+    caminho_absoluto = Path(PASTA_FOTOS_OS) / nome_arquivo
+    caminho_relativo = Path("fotos_os") / nome_arquivo
+
+    with open(caminho_absoluto, "wb") as f:
         f.write(dados_binarios)
 
-    foto = models.FotoOrdem(ordem_id=ordem_id, caminho=caminho, client_uuid=dados.client_uuid)
+    foto = models.FotoOrdem(
+        ordem_id=ordem_id,
+        caminho=caminho_relativo.as_posix(),
+        client_uuid=dados.client_uuid,
+    )
     db.add(foto)
     try:
         db.commit()
@@ -1100,17 +1640,38 @@ def anexar_foto_ordem(ordem_id: int, dados: FotoOrdemCreate, db: Session = Depen
 
 @app.get("/admin/ordens/{ordem_id}/fotos/{foto_id}", dependencies=[Depends(exigir_papel())])
 def ver_foto_ordem(ordem_id: int, foto_id: int, db: Session = Depends(get_db)):
-    foto = db.query(models.FotoOrdem).filter_by(id=foto_id, ordem_id=ordem_id).first()
-    if not foto or not os.path.exists(foto.caminho):
-        raise HTTPException(404, "Foto não encontrada")
-    return FileResponse(foto.caminho)
+    foto = db.query(models.FotoOrdem).filter_by(
+        id=foto_id,
+        ordem_id=ordem_id,
+    ).first()
+
+    caminho_foto = (
+        resolver_caminho_arquivo(foto.caminho)
+        if foto
+        else None
+    )
+
+    if not foto or not caminho_foto or not caminho_foto.exists():
+        raise HTTPException(404, "Foto n?o encontrada")
+
+    return FileResponse(str(caminho_foto))
 
 
 @app.get("/ordens/{ordem_id}")
-def ver_ordem(ordem_id: int, db: Session = Depends(get_db)):
+def ver_ordem(
+    ordem_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual),
+):
     ordem = db.query(models.OrdemServico).get(ordem_id)
     if not ordem:
         raise HTTPException(404, "Ordem não encontrada")
+
+    if ordem.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta OS pertence a outro tecnico",
+        )
     return {
         "id": ordem.id,
         "cliente_local": ordem.cliente_local,
@@ -1127,7 +1688,8 @@ def ver_ordem(ordem_id: int, db: Session = Depends(get_db)):
 # ---------- Movimentação de estoque (baixa automática no estoque PESSOAL) ----------
 
 @app.post("/movimentacoes")
-def registrar_uso_material(dados: MovimentacaoCreate, db: Session = Depends(get_db)):
+def registrar_uso_material(dados: MovimentacaoCreate, db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual)):
     # idempotência: se o celular reenviar a mesma ação offline, não duplica
     if dados.client_uuid:
         existente = db.query(models.MovimentacaoEstoque).filter_by(
@@ -1144,6 +1706,12 @@ def registrar_uso_material(dados: MovimentacaoCreate, db: Session = Depends(get_
     if not ordem:
         raise HTTPException(404, "Ordem não encontrada")
 
+
+    if ordem.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Esta OS pertence a outro tecnico",
+        )
     # BAIXA AUTOMÁTICA no estoque PESSOAL do técnico dono da OS (não no
     # estoque central — esse já foi debitado quando a transferência saiu)
     pessoal = db.query(models.EstoquePessoal).filter_by(
@@ -1154,6 +1722,14 @@ def registrar_uso_material(dados: MovimentacaoCreate, db: Session = Depends(get_
             tecnico_id=ordem.tecnico_id, material_id=dados.material_id, qtd_atual=0
         )
         db.add(pessoal)
+    if not pessoal or pessoal.qtd_atual < dados.quantidade:
+        disponivel = pessoal.qtd_atual if pessoal else 0
+
+        raise HTTPException(
+            status_code=400,
+            detail=f"Estoque pessoal insuficiente. Disponivel: {disponivel}",
+        )
+
     pessoal.qtd_atual -= dados.quantidade
 
     mov = models.MovimentacaoEstoque(
@@ -1182,9 +1758,19 @@ def registrar_uso_material(dados: MovimentacaoCreate, db: Session = Depends(get_
 # ---------- Solicitações de material (técnico pede, admin aprova) ----------
 
 @app.post("/solicitacoes")
-def criar_solicitacao(dados: SolicitacaoCreate, db: Session = Depends(get_db)):
+def criar_solicitacao(
+    dados: SolicitacaoCreate,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(obter_tecnico_atual),
+):
     """Técnico pede material do estoque central. Fica pendente até o admin
     aprovar ou rejeitar."""
+    if dados.tecnico_id != tecnico_atual.id:
+        raise HTTPException(
+            status_code=403,
+            detail="N?o ? permitido solicitar material em nome de outro t?cnico",
+        )
+
     if dados.client_uuid:
         existente = db.query(models.SolicitacaoMaterial).filter_by(
             client_uuid=dados.client_uuid
@@ -1212,7 +1798,11 @@ def criar_solicitacao(dados: SolicitacaoCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/tecnicos/{tecnico_id}/solicitacoes")
-def listar_solicitacoes_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
+def listar_solicitacoes_do_tecnico(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(exigir_mesmo_tecnico),
+):
     """Técnico acompanha o status dos pedidos que fez (pra ele saber se já
     foi aprovado, sem precisar perguntar pra ninguém)."""
     solicitacoes = db.query(models.SolicitacaoMaterial).filter_by(
@@ -1314,11 +1904,34 @@ def admin_estoque_do_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
 
 # ---------- Painel Admin: login, técnicos, ordens, estoque geral ----------
 
-@app.post("/admin/login", response_model=AdminUsuarioOut)
+@app.post("/admin/login", response_model=AdminLoginOut)
 def admin_login(dados: AdminLogin, db: Session = Depends(get_db)):
-    admin = db.query(models.AdminUsuario).filter_by(login=dados.login, ativo=True).first()
-    if not admin or not bcrypt.checkpw(dados.senha.encode(), admin.senha_hash.encode()):
-        raise HTTPException(401, "Login ou senha inválidos")
+    admin = db.query(models.AdminUsuario).filter_by(
+        login=dados.login,
+        ativo=True,
+    ).first()
+
+    if not admin or not bcrypt.checkpw(
+        dados.senha.encode(),
+        admin.senha_hash.encode(),
+    ):
+        raise HTTPException(401, "Login ou senha inv?lidos")
+
+    return {
+        "id": admin.id,
+        "nome": admin.nome,
+        "login": admin.login,
+        "papel": admin.papel,
+        "ativo": admin.ativo,
+        "access_token": criar_token_admin(admin),
+        "token_type": "bearer",
+    }
+
+
+@app.get("/admin/me", response_model=AdminUsuarioOut)
+def admin_me(
+    admin: models.AdminUsuario = Depends(obter_admin),
+):
     return admin
 
 
@@ -1523,25 +2136,85 @@ async def admin_upload_foto_perfil(tecnico_id: int, arquivo: UploadFile = File(.
     if not tecnico:
         raise HTTPException(404, "Técnico não encontrado")
     extensao = os.path.splitext(arquivo.filename or "foto.jpg")[1] or ".jpg"
-    caminho = os.path.join(PASTA_FOTOS_PERFIL, f"tecnico_{tecnico_id}{extensao}")
+    nome_arquivo = f"tecnico_{tecnico_id}{extensao}"
+
+    caminho_absoluto = Path(PASTA_FOTOS_PERFIL) / nome_arquivo
+    caminho_relativo = Path("fotos_perfil") / nome_arquivo
+
     conteudo = await arquivo.read()
-    with open(caminho, "wb") as f:
+
+    with open(caminho_absoluto, "wb") as f:
         f.write(conteudo)
-    tecnico.foto_perfil = caminho
+
+    tecnico.foto_perfil = caminho_relativo.as_posix()
     db.commit()
     return {"status": "ok"}
 
 
-@app.get("/tecnicos/{tecnico_id}/foto-perfil")
-def ver_foto_perfil(tecnico_id: int, db: Session = Depends(get_db)):
+@app.get(
+    "/tecnicos/{tecnico_id}/foto-perfil",
+)
+def ver_foto_perfil(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(exigir_mesmo_tecnico),
+):
     tecnico = db.query(models.Tecnico).get(tecnico_id)
-    if not tecnico or not tecnico.foto_perfil or not os.path.exists(tecnico.foto_perfil):
-        raise HTTPException(404, "Sem foto de perfil")
-    return FileResponse(tecnico.foto_perfil)
+
+    caminho_foto = (
+        resolver_caminho_arquivo(tecnico.foto_perfil)
+        if tecnico
+        else None
+    )
+
+    if (
+        not tecnico
+        or not caminho_foto
+        or not caminho_foto.exists()
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Sem foto de perfil",
+        )
+
+    return FileResponse(str(caminho_foto))
+
+
+@app.get(
+    "/admin/tecnicos/{tecnico_id}/foto-perfil",
+    dependencies=[Depends(exigir_papel())],
+)
+def admin_ver_foto_perfil(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+):
+    tecnico = db.query(models.Tecnico).get(tecnico_id)
+
+    caminho_foto = (
+        resolver_caminho_arquivo(tecnico.foto_perfil)
+        if tecnico
+        else None
+    )
+
+    if (
+        not tecnico
+        or not caminho_foto
+        or not caminho_foto.exists()
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Sem foto de perfil",
+        )
+
+    return FileResponse(str(caminho_foto))
 
 
 @app.get("/tecnicos/{tecnico_id}/perfil", response_model=TecnicoOut)
-def ver_perfil_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
+def ver_perfil_tecnico(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+    tecnico_atual: models.Tecnico = Depends(exigir_mesmo_tecnico),
+):
     """O próprio app do técnico usa isso pra mostrar a aba Perfil."""
     tecnico = db.query(models.Tecnico).get(tecnico_id)
     if not tecnico:
@@ -1574,12 +2247,88 @@ def admin_atribuir_ordem(dados: OrdemAtribuir, db: Session = Depends(get_db)):
     return ordem
 
 
+@app.patch(
+    "/admin/ordens/{ordem_id}/atribuir",
+    response_model=OrdemOut,
+    dependencies=[Depends(exigir_papel())],
+)
+def admin_atribuir_ordem_existente(
+    ordem_id: int,
+    dados: OrdemAtribuirExistente,
+    db: Session = Depends(get_db),
+):
+    ordem = db.query(
+        models.OrdemServico
+    ).filter(
+        models.OrdemServico.id == ordem_id
+    ).first()
+
+    if not ordem:
+        raise HTTPException(
+            status_code=404,
+            detail="OS nao encontrada",
+        )
+
+    if ordem.status != models.StatusOS.pendente:
+        raise HTTPException(
+            status_code=409,
+            detail="Apenas OS pendente pode ser atribuida",
+        )
+
+    tecnico = db.query(
+        models.Tecnico
+    ).filter(
+        models.Tecnico.id == dados.tecnico_id,
+        models.Tecnico.ativo == True,
+    ).first()
+
+    if not tecnico:
+        raise HTTPException(
+            status_code=404,
+            detail="Tecnico nao encontrado ou inativo",
+        )
+
+    if not tecnico.aprovado:
+        raise HTTPException(
+            status_code=409,
+            detail="Tecnico ainda nao aprovado",
+        )
+
+    if ordem.tecnico_id is not None:
+        if ordem.tecnico_id == tecnico.id:
+            return ordem
+
+        raise HTTPException(
+            status_code=409,
+            detail="OS ja atribuida a outro tecnico",
+        )
+
+    ordem.tecnico_id = tecnico.id
+
+    db.commit()
+    db.refresh(ordem)
+
+    return ordem
+
+
 @app.get("/admin/ordens/{ordem_id}/pdf", dependencies=[Depends(exigir_papel())])
 def baixar_pdf_ordem(ordem_id: int, db: Session = Depends(get_db)):
     ordem = db.query(models.OrdemServico).get(ordem_id)
-    if not ordem or not ordem.pdf_path or not os.path.exists(ordem.pdf_path):
-        raise HTTPException(404, "PDF não disponível pra essa OS")
-    return FileResponse(ordem.pdf_path, media_type="application/pdf", filename=f"OS_{ordem.id}.pdf")
+
+    caminho_pdf = (
+        resolver_caminho_arquivo(ordem.pdf_path)
+        if ordem and ordem.pdf_path
+        else None
+    )
+
+    if not ordem or not caminho_pdf or not caminho_pdf.exists():
+        raise HTTPException(404, "PDF n?o dispon?vel pra essa OS")
+
+    return FileResponse(
+        str(caminho_pdf),
+        media_type="application/pdf",
+        filename=f"OS_{ordem.id}.pdf",
+    )
 
 
 @app.get("/admin/ordens", dependencies=[Depends(exigir_papel())])
@@ -1610,7 +2359,7 @@ def admin_listar_ordens(status: Optional[str] = None, cliente_id: Optional[int] 
             "id": o.id, "tipo": o.tipo, "cliente_local": o.cliente_local,
             "cliente_id": o.cliente_id,
             "nome_cliente": o.nome_cliente, "endereco": o.endereco, "prioridade": o.prioridade,
-            "status": o.status, "tecnico": o.tecnico.nome,
+            "status": o.status, "tecnico_id": o.tecnico_id, "tecnico": o.tecnico.nome if o.tecnico else "Nao atribuido",
             "criada_por_admin": o.criada_por_admin,
             "lat_inicio": o.lat_inicio, "lon_inicio": o.lon_inicio,
             "lat_fim": o.lat_fim, "lon_fim": o.lon_fim,
@@ -1631,39 +2380,6 @@ def admin_listar_ordens(status: Optional[str] = None, cliente_id: Optional[int] 
             ],
         })
     return resultado
-
-
-@app.get("/admin/materiais/sugestao-compra", dependencies=[Depends(exigir_papel(models.PapelAdmin.almoxarifado))])
-def sugestao_compra(db: Session = Depends(get_db)):
-    """Sugestão de quanto comprar de cada material com estoque baixo, com
-    base no consumo médio dos últimos 90 dias. É só informativo — NÃO cria
-    nada no Financeiro automaticamente, fica a critério de quem for comprar."""
-    limite = datetime.utcnow() - timedelta(days=90)
-    materiais = db.query(models.Material).filter(
-        models.Material.qtd_atual <= models.Material.qtd_minima
-    ).all()
-
-    sugestoes = []
-    for m in materiais:
-        consumo_total = db.query(models.MovimentacaoEstoque).filter(
-            models.MovimentacaoEstoque.material_id == m.id,
-            models.MovimentacaoEstoque.tipo == models.TipoMovimentacao.saida,
-            models.MovimentacaoEstoque.timestamp >= limite,
-        ).all()
-        total_consumido = sum(mov.quantidade for mov in consumo_total)
-        consumo_mensal_medio = round(total_consumido / 3, 1)  # 90 dias ≈ 3 meses
-
-        # sugere estoque pra 2 meses de consumo médio, cobrindo o déficit atual
-        deficit_ate_minimo = max(m.qtd_minima - m.qtd_atual, 0)
-        sugestao = max(consumo_mensal_medio * 2, deficit_ate_minimo, m.qtd_minima)
-
-        sugestoes.append({
-            "material_id": m.id, "nome": m.nome, "unidade": m.unidade,
-            "qtd_atual": m.qtd_atual, "qtd_minima": m.qtd_minima,
-            "consumo_mensal_medio": consumo_mensal_medio,
-            "sugestao_compra": round(sugestao, 1),
-        })
-    return sugestoes
 
 
 @app.get("/admin/estoque-completo", dependencies=[Depends(exigir_papel(models.PapelAdmin.almoxarifado))])

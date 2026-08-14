@@ -10,6 +10,43 @@ let catalogoCentralCache = JSON.parse(localStorage.getItem("catalogo_central_cac
 let minhasSolicitacoesCache = JSON.parse(localStorage.getItem("minhas_solicitacoes_cache") || "[]");
 let fila = JSON.parse(localStorage.getItem("fila_sync") || "[]");
 
+/*
+ * Wrapper HTTP do aplicativo do t?cnico.
+ * Adiciona automaticamente o JWT quando houver t?cnico autenticado.
+ */
+async function apiFetch(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+
+  if (tecnico && tecnico.access_token) {
+    headers.set("Authorization", `Bearer ${tecnico.access_token}`);
+  }
+
+  return window.fetch(url, {
+    ...options,
+    headers,
+  });
+}
+
+async function carregarImagemAutenticada(img, url) {
+  const resposta = await apiFetch(url);
+
+  if (!resposta.ok) {
+    throw new Error(`HTTP ${resposta.status}`);
+  }
+
+  const blob = await resposta.blob();
+
+  if (img.dataset.objectUrl) {
+    URL.revokeObjectURL(img.dataset.objectUrl);
+  }
+
+  const objectUrl = URL.createObjectURL(blob);
+
+  img.dataset.objectUrl = objectUrl;
+  img.src = objectUrl;
+}
+
+
 function uuid() {
   return crypto.randomUUID ? crypto.randomUUID() :
     'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
@@ -67,7 +104,7 @@ async function fazerLogin() {
   erroEl.textContent = "";
 
   try {
-    const resp = await fetch(`${API_URL}/tecnicos/login`, {
+    const resp = await apiFetch(`${API_URL}/tecnicos/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ login, pin }),
@@ -118,7 +155,7 @@ function mudarTab(tab) {
 // ===== PERFIL DO TÉCNICO =====
 async function carregarPerfil() {
   try {
-    const r = await fetch(`${API_URL}/tecnicos/${tecnico.id}/perfil`);
+    const r = await apiFetch(`${API_URL}/tecnicos/${tecnico.id}/perfil`);
     const perfil = await r.json();
     localStorage.setItem("perfil_cache", JSON.stringify(perfil));
     renderizarPerfil(perfil);
@@ -140,7 +177,14 @@ function renderizarPerfil(perfil) {
   const img = document.getElementById("perfil-foto");
   const semFoto = document.getElementById("perfil-sem-foto");
   if (perfil.tem_foto_perfil) {
-    img.src = `${API_URL}/tecnicos/${tecnico.id}/foto-perfil?t=${Date.now()}`;
+    carregarImagemAutenticada(
+      img,
+      `${API_URL}/tecnicos/${tecnico.id}/foto-perfil?t=${Date.now()}`
+    ).catch((erro) => {
+      console.error("Erro ao carregar foto de perfil:", erro);
+      img.classList.add("oculto");
+      semFoto.classList.remove("oculto");
+    });
     img.classList.remove("oculto");
     semFoto.classList.add("oculto");
   } else {
@@ -152,7 +196,7 @@ function renderizarPerfil(perfil) {
 // ===== ESTOQUE PESSOAL (o que o técnico tem fisicamente com ele) =====
 async function carregarEstoquePessoal() {
   try {
-    const r = await fetch(`${API_URL}/tecnicos/${tecnico.id}/estoque-pessoal`);
+    const r = await apiFetch(`${API_URL}/tecnicos/${tecnico.id}/estoque-pessoal`);
     estoquePessoalCache = await r.json();
     salvarEstado();
   } catch (e) {
@@ -188,7 +232,7 @@ let pendentesCache = JSON.parse(localStorage.getItem("pendentes_cache") || "[]")
 
 async function carregarPendentes() {
   try {
-    const r = await fetch(`${API_URL}/tecnicos/${tecnico.id}/ordens-pendentes`);
+    const r = await apiFetch(`${API_URL}/tecnicos/${tecnico.id}/ordens-pendentes`);
     pendentesCache = await r.json();
     localStorage.setItem("pendentes_cache", JSON.stringify(pendentesCache));
   } catch (e) {
@@ -254,7 +298,7 @@ let transferenciasCache = JSON.parse(localStorage.getItem("transferencias_cache"
 
 async function carregarTransferencias() {
   try {
-    const r = await fetch(`${API_URL}/tecnicos/${tecnico.id}/transferencias-pendentes`);
+    const r = await apiFetch(`${API_URL}/tecnicos/${tecnico.id}/transferencias-pendentes`);
     transferenciasCache = await r.json();
     localStorage.setItem("transferencias_cache", JSON.stringify(transferenciasCache));
   } catch (e) {
@@ -284,7 +328,7 @@ async function confirmarTransferencia(id) {
   localStorage.setItem("transferencias_cache", JSON.stringify(transferenciasCache));
   renderizarTransferencias();
   try {
-    await fetch(`${API_URL}/transferencias/${id}/confirmar`, { method: "POST" });
+    await apiFetch(`${API_URL}/transferencias/${id}/confirmar`, { method: "POST" });
     await Promise.all([carregarEstoquePessoal(), carregarMinhasFerramentas()]);
   } catch (e) {
     // sem internet agora: enfileira pra tentar depois
@@ -298,7 +342,7 @@ async function recusarTransferencia(id) {
   localStorage.setItem("transferencias_cache", JSON.stringify(transferenciasCache));
   renderizarTransferencias();
   try {
-    await fetch(`${API_URL}/transferencias/${id}/recusar`, { method: "POST" });
+    await apiFetch(`${API_URL}/transferencias/${id}/recusar`, { method: "POST" });
   } catch (e) {
     enfileirar({ tipo: "recusar_transferencia", payload: { id } });
   }
@@ -309,7 +353,7 @@ let minhasFerramentasCache = JSON.parse(localStorage.getItem("minhas_ferramentas
 
 async function carregarMinhasFerramentas() {
   try {
-    const r = await fetch(`${API_URL}/tecnicos/${tecnico.id}/ferramentas`);
+    const r = await apiFetch(`${API_URL}/tecnicos/${tecnico.id}/ferramentas`);
     minhasFerramentasCache = await r.json();
     localStorage.setItem("minhas_ferramentas_cache", JSON.stringify(minhasFerramentasCache));
   } catch (e) {
@@ -337,7 +381,7 @@ async function notificarProblema(ferramentaId, nome) {
   if (!descricao) return;
   const payload = { ferramenta_id: ferramentaId, tecnico_id: tecnico.id, descricao };
   try {
-    await fetch(`${API_URL}/ferramentas/avisos`, {
+    await apiFetch(`${API_URL}/ferramentas/avisos`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
@@ -351,7 +395,7 @@ async function notificarProblema(ferramentaId, nome) {
 // ===== SOLICITAR MATERIAL AO ESTOQUE CENTRAL =====
 async function carregarCatalogoCentral() {
   try {
-    const r = await fetch(`${API_URL}/materiais`);
+    const r = await apiFetch(`${API_URL}/materiais`);
     catalogoCentralCache = await r.json();
     salvarEstado();
   } catch (e) {
@@ -374,7 +418,7 @@ async function solicitarMaterial() {
   const payload = { tecnico_id: tecnico.id, material_id, quantidade, observacao, client_uuid };
 
   try {
-    await fetch(`${API_URL}/solicitacoes`, {
+    await apiFetch(`${API_URL}/solicitacoes`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
@@ -392,7 +436,7 @@ async function solicitarMaterial() {
 
 async function carregarMinhasSolicitacoes() {
   try {
-    const r = await fetch(`${API_URL}/tecnicos/${tecnico.id}/solicitacoes`);
+    const r = await apiFetch(`${API_URL}/tecnicos/${tecnico.id}/solicitacoes`);
     minhasSolicitacoesCache = await r.json();
     salvarEstado();
   } catch (e) {
@@ -462,7 +506,7 @@ function mostrarOsAtiva() {
   // mostra o botão de ver a rota do cabo se esse cliente tiver uma cadastrada
   const areaRota = document.getElementById("rota-cabo-area");
   if (osAtiva.cliente_id) {
-    fetch(`${API_URL}/clientes/${osAtiva.cliente_id}`).then(r => r.json()).then(c => {
+    apiFetch(`${API_URL}/clientes/${osAtiva.cliente_id}`).then(r => r.json()).then(c => {
       areaRota.classList.toggle("oculto", !c.tem_imagem_rota);
     }).catch(() => areaRota.classList.add("oculto"));
   } else {
@@ -475,7 +519,12 @@ function mostrarOsAtiva() {
 function mostrarRotaCabo() {
   const img = document.getElementById("rota-cabo-imagem");
   if (img.classList.contains("oculto")) {
-    img.src = `${API_URL}/clientes/${osAtiva.cliente_id}/rota-cabo`;
+    carregarImagemAutenticada(
+      img,
+      `${API_URL}/clientes/${osAtiva.cliente_id}/rota-cabo`
+    ).catch((erro) => {
+      console.error("Erro ao carregar rota de cabo:", erro);
+    });
     img.classList.remove("oculto");
   } else {
     img.classList.add("oculto");
@@ -637,7 +686,7 @@ async function sincronizarFila() {
   for (const acao of fila) {
     try {
       if (acao.tipo === "criar_ordem") {
-        const r = await fetch(`${API_URL}/ordens`, {
+        const r = await apiFetch(`${API_URL}/ordens`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify(acao.payload),
         });
@@ -648,7 +697,7 @@ async function sincronizarFila() {
       } else if (acao.tipo === "deslocamento") {
         const ordemId = acao.payload.ordem_id || mapaOrdens[acao.payload.ordem_client_uuid];
         if (!ordemId) throw new Error("ordem ainda não sincronizada");
-        const r = await fetch(`${API_URL}/ordens/${ordemId}/deslocamento`, {
+        const r = await apiFetch(`${API_URL}/ordens/${ordemId}/deslocamento`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ lat: acao.payload.lat, lon: acao.payload.lon }),
         });
@@ -657,7 +706,7 @@ async function sincronizarFila() {
       } else if (acao.tipo === "iniciar_ordem") {
         const ordemId = acao.payload.ordem_id || mapaOrdens[acao.payload.ordem_client_uuid];
         if (!ordemId) throw new Error("ordem ainda não sincronizada");
-        const r = await fetch(`${API_URL}/ordens/${ordemId}/iniciar`, {
+        const r = await apiFetch(`${API_URL}/ordens/${ordemId}/iniciar`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ lat: acao.payload.lat, lon: acao.payload.lon }),
         });
@@ -666,7 +715,7 @@ async function sincronizarFila() {
       } else if (acao.tipo === "registrar_material") {
         const ordemId = acao.payload.ordem_id || mapaOrdens[acao.payload.ordem_client_uuid];
         if (!ordemId) throw new Error("ordem ainda não sincronizada"); // tenta de novo depois
-        const r = await fetch(`${API_URL}/movimentacoes`, {
+        const r = await apiFetch(`${API_URL}/movimentacoes`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             ordem_id: ordemId, material_id: acao.payload.material_id,
@@ -678,7 +727,7 @@ async function sincronizarFila() {
       } else if (acao.tipo === "fechar_ordem") {
         const ordemId = acao.payload.ordem_id || mapaOrdens[acao.payload.ordem_client_uuid];
         if (!ordemId) throw new Error("ordem ainda não sincronizada");
-        const r = await fetch(`${API_URL}/ordens/${ordemId}/fechar`, {
+        const r = await apiFetch(`${API_URL}/ordens/${ordemId}/fechar`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             lat: acao.payload.lat, lon: acao.payload.lon,
@@ -690,22 +739,22 @@ async function sincronizarFila() {
         if (!r.ok) throw new Error();
 
       } else if (acao.tipo === "confirmar_transferencia") {
-        const r = await fetch(`${API_URL}/transferencias/${acao.payload.id}/confirmar`, { method: "POST" });
+        const r = await apiFetch(`${API_URL}/transferencias/${acao.payload.id}/confirmar`, { method: "POST" });
         if (!r.ok) throw new Error();
 
       } else if (acao.tipo === "recusar_transferencia") {
-        const r = await fetch(`${API_URL}/transferencias/${acao.payload.id}/recusar`, { method: "POST" });
+        const r = await apiFetch(`${API_URL}/transferencias/${acao.payload.id}/recusar`, { method: "POST" });
         if (!r.ok) throw new Error();
 
       } else if (acao.tipo === "notificar_problema") {
-        const r = await fetch(`${API_URL}/ferramentas/avisos`, {
+        const r = await apiFetch(`${API_URL}/ferramentas/avisos`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify(acao.payload),
         });
         if (!r.ok) throw new Error();
 
       } else if (acao.tipo === "criar_solicitacao") {
-        const r = await fetch(`${API_URL}/solicitacoes`, {
+        const r = await apiFetch(`${API_URL}/solicitacoes`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify(acao.payload),
         });
@@ -714,7 +763,7 @@ async function sincronizarFila() {
       } else if (acao.tipo === "anexar_foto") {
         const ordemId = acao.payload.ordem_id || mapaOrdens[acao.payload.ordem_client_uuid];
         if (!ordemId) throw new Error("ordem ainda não sincronizada");
-        const r = await fetch(`${API_URL}/ordens/${ordemId}/fotos`, {
+        const r = await apiFetch(`${API_URL}/ordens/${ordemId}/fotos`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ imagem_base64: acao.payload.imagem_base64, client_uuid: acao.payload.client_uuid }),
         });

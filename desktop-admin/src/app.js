@@ -2,18 +2,53 @@
 // produção (ex: "https://estoque.suaempresa.com.br").
 const API_URL = "http://localhost:8000";
 
-let adminLogin = localStorage.getItem("admin_login") || "";
-let adminSenha = localStorage.getItem("admin_senha") || "";
+let adminToken = localStorage.getItem("admin_token") || "";
 let adminAtual = JSON.parse(localStorage.getItem("admin_atual") || "null"); // {id, nome, login, papel}
+let adminLogin = adminAtual?.login || "";
 let tecnicosCache = [];
 let ferramentasDisponiveisCache = [];
 
+function authHeaders() {
+  const resultado = {};
+
+  if (adminToken) {
+    resultado["Authorization"] = `Bearer ${adminToken}`;
+  }
+
+  return resultado;
+}
+
 function headers() {
   return {
+    ...authHeaders(),
     "Content-Type": "application/json",
-    "X-Admin-Login": adminLogin,
-    "X-Admin-Senha": adminSenha,
   };
+}
+
+async function carregarFotoTecnicoAdmin(img, tecnicoId) {
+  try {
+    const resposta = await fetch(
+      `${API_URL}/admin/tecnicos/${tecnicoId}/foto-perfil`,
+      { headers: headers() }
+    );
+
+    if (!resposta.ok) {
+      throw new Error(`HTTP ${resposta.status}`);
+    }
+
+    const blob = await resposta.blob();
+    const objectUrl = URL.createObjectURL(blob);
+
+    img.dataset.objectUrl = objectUrl;
+    img.src = objectUrl;
+  } catch (erro) {
+    console.error(
+      `Erro ao carregar foto do tecnico ${tecnicoId}:`,
+      erro
+    );
+
+    img.style.display = "none";
+  }
 }
 
 // Abas que só o papel "gerencia" pode ver. Almoxarifado só mexe em
@@ -31,11 +66,26 @@ async function fazerLoginAdmin() {
       body: JSON.stringify({ login, senha }),
     });
     if (!r.ok) throw new Error("Login ou senha incorretos");
-    adminAtual = await r.json();
-    adminLogin = login; adminSenha = senha;
-    localStorage.setItem("admin_login", login);
-    localStorage.setItem("admin_senha", senha);
+    const dadosLogin = await r.json();
+
+    adminToken = dadosLogin.access_token;
+
+    adminAtual = {
+      id: dadosLogin.id,
+      nome: dadosLogin.nome,
+      login: dadosLogin.login,
+      papel: dadosLogin.papel,
+      ativo: dadosLogin.ativo,
+    };
+
+    adminLogin = adminAtual.login;
+
+    localStorage.setItem("admin_token", adminToken);
     localStorage.setItem("admin_atual", JSON.stringify(adminAtual));
+
+    // Remove credenciais antigas caso existam de versoes anteriores.
+    localStorage.removeItem("admin_login");
+    localStorage.removeItem("admin_senha");
     entrarNoApp();
     await carregarTudo();
     await carregarDashboard();
@@ -67,27 +117,52 @@ function entrarNoApp() {
 }
 
 function logoutAdmin() {
-  adminAtual = null; adminLogin = ""; adminSenha = "";
+  adminAtual = null;
+  adminLogin = "";
+  adminToken = "";
+
+  localStorage.removeItem("admin_token");
   localStorage.removeItem("admin_atual");
+
+  // Limpeza de credenciais antigas.
   localStorage.removeItem("admin_login");
   localStorage.removeItem("admin_senha");
+
   location.reload();
 }
 
 (async function initAuto() {
-  if (adminLogin && adminSenha) {
-    const r = await fetch(`${API_URL}/admin/login`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ login: adminLogin, senha: adminSenha }),
-    }).catch(() => null);
-    if (r && r.ok) {
-      adminAtual = await r.json();
-      localStorage.setItem("admin_atual", JSON.stringify(adminAtual));
-      entrarNoApp();
-      await carregarTudo();
-    await carregarDashboard();
-    }
+  if (!adminToken) {
+    return;
   }
+
+  const r = await fetch(`${API_URL}/admin/me`, {
+    headers: headers(),
+  }).catch(() => null);
+
+  if (r && r.ok) {
+    adminAtual = await r.json();
+    adminLogin = adminAtual.login;
+
+    localStorage.setItem("admin_atual", JSON.stringify(adminAtual));
+
+    entrarNoApp();
+    await carregarTudo();
+    await carregarDashboard();
+    return;
+  }
+
+  // Token ausente, expirado ou invalido.
+  adminToken = "";
+  adminAtual = null;
+  adminLogin = "";
+
+  localStorage.removeItem("admin_token");
+  localStorage.removeItem("admin_atual");
+
+  // Remove qualquer credencial do sistema antigo.
+  localStorage.removeItem("admin_login");
+  localStorage.removeItem("admin_senha");
 })();
 
 // ===== NAVEGAÇÃO ENTRE ABAS =====
@@ -122,7 +197,7 @@ async function carregarDashboard() {
   const somenteGerencia = adminAtual && adminAtual.papel === "gerencia";
 
   const [rBaixoEstoque, rSolicitacoes, rAvisos, rTransferencias] = await Promise.all([
-    fetch(`${API_URL}/materiais/baixo-estoque`),
+    fetch(`${API_URL}/materiais/baixo-estoque`, { headers: headers() }),
     fetch(`${API_URL}/admin/solicitacoes?status=pendente`, { headers: headers() }),
     fetch(`${API_URL}/admin/avisos?status=aberto`, { headers: headers() }),
     fetch(`${API_URL}/admin/transferencias?status=pendente`, { headers: headers() }),
@@ -602,7 +677,7 @@ async function carregarTecnicos() {
     <tr>
       <td style="display:flex; align-items:center; gap:8px;">
         ${t.tem_foto_perfil
-          ? `<img src="${API_URL}/tecnicos/${t.id}/foto-perfil" style="width:28px;height:28px;border-radius:50%;object-fit:cover;">`
+          ? `<img class="foto-tecnico-admin" data-tecnico-id="${t.id}" style="width:28px;height:28px;border-radius:50%;object-fit:cover;">`
           : `<span style="width:28px;height:28px;border-radius:50%;background:#334155;display:inline-flex;align-items:center;justify-content:center;font-size:14px;">👤</span>`}
         ${t.nome}
       </td>
@@ -616,6 +691,15 @@ async function carregarTecnicos() {
       </td>
     </tr>
   `).join("");
+
+  document
+    .querySelectorAll(".foto-tecnico-admin")
+    .forEach((img) => {
+      carregarFotoTecnicoAdmin(
+        img,
+        img.dataset.tecnicoId
+      );
+    });
 
   // só técnicos aprovados aparecem pra atribuir OS / receber transferência
   const aprovados = tecnicosCache.filter(t => t.aprovado);
@@ -697,7 +781,7 @@ async function criarTecnico() {
     const form = new FormData();
     form.append("arquivo", arquivoFoto);
     await fetch(`${API_URL}/admin/tecnicos/${novoTecnico.id}/foto-perfil`, {
-      method: "POST", headers: { "X-Admin-Login": adminLogin, "X-Admin-Senha": adminSenha }, body: form,
+      method: "POST", headers: authHeaders(), body: form,
     });
   }
 
@@ -725,7 +809,7 @@ async function fotoTecnicoSelecionada(event) {
   const form = new FormData();
   form.append("arquivo", arquivo);
   await fetch(`${API_URL}/admin/tecnicos/${tecnicoFotoAlvo}/foto-perfil`, {
-    method: "POST", headers: { "X-Admin-Login": adminLogin, "X-Admin-Senha": adminSenha }, body: form,
+    method: "POST", headers: authHeaders(), body: form,
   });
   carregarTecnicos();
 }
@@ -779,11 +863,25 @@ function formatarMinutos(min) {
 }
 
 async function carregarOrdens() {
+  if (tecnicosCache.length === 0) {
+    await carregarTecnicos();
+  }
+
   const url = filtroAtual ? `${API_URL}/admin/ordens?status=${filtroAtual}` : `${API_URL}/admin/ordens`;
   const r = await fetch(url, { headers: headers() });
   const ordens = await r.json();
 
   const iconeTipo = { preventiva: "🛠️ Preventiva", manutencao: "Manutenção", instalacao: "Instalação" };
+
+  const tecnicosAprovados = tecnicosCache.filter(
+    t => t.aprovado
+  );
+
+  const opcoesTecnicos = tecnicosAprovados
+    .map(
+      t => `<option value="${t.id}">${t.nome}</option>`
+    )
+    .join("");
 
   document.getElementById("tabela-ordens").innerHTML = ordens.map(o => `
     <tr style="${o.prioridade ? 'background:rgba(220,38,38,0.08);' : ''}">
@@ -804,10 +902,99 @@ async function carregarOrdens() {
         ${o.minutos_execucao !== null ? `🔧 ${formatarMinutos(o.minutos_execucao)}<br>` : ""}
         ${o.minutos_total !== null ? `<strong>Total: ${formatarMinutos(o.minutos_total)}</strong>` : "-"}
       </td>
-      <td>${o.tem_pdf ? `<button class="pequeno secundario" onclick="baixarPdfOrdem(${o.id})">📄 Baixar PDF</button>` : "-"}</td>
+      <td>
+        ${o.status === "pendente" && o.tecnico_id === null ? `
+          <select
+            id="atribuir-tecnico-${o.id}"
+            style="min-width:140px; margin-bottom:6px;"
+          >
+            <option value="">Escolha o tecnico</option>
+            ${opcoesTecnicos}
+          </select>
+          <button
+            class="pequeno"
+            onclick="atribuirOrdemExistente(${o.id})"
+          >
+            Atribuir
+          </button>
+        ` : ""}
+        ${o.tem_pdf
+          ? `<button class="pequeno secundario" onclick="baixarPdfOrdem(${o.id})">Baixar PDF</button>`
+          : (
+              o.status === "pendente"
+              && o.tecnico_id === null
+                ? ""
+                : "-"
+            )}
+      </td>
     </tr>
   `).join("");
 }
+
+async function atribuirOrdemExistente(id) {
+  const select = document.getElementById(
+    `atribuir-tecnico-${id}`
+  );
+
+  const tecnico_id = parseInt(
+    select?.value,
+    10
+  );
+
+  if (!tecnico_id) {
+    alert("Escolha o tecnico.");
+    return;
+  }
+
+  const tecnico = tecnicosCache.find(
+    t => t.id === tecnico_id
+  );
+
+  const nomeTecnico = tecnico?.nome || tecnico_id;
+
+  if (
+    !confirm(
+      `Atribuir a OS #${id} para ${nomeTecnico}?`
+    )
+  ) {
+    return;
+  }
+
+  const resposta = await fetch(
+    `${API_URL}/admin/ordens/${id}/atribuir`,
+    {
+      method: "PATCH",
+      headers: headers(),
+      body: JSON.stringify({
+        tecnico_id,
+      }),
+    }
+  );
+
+  let dados = {};
+
+  try {
+    dados = await resposta.json();
+  }
+  catch (_) {
+    dados = {};
+  }
+
+  if (!resposta.ok) {
+    alert(
+      dados.detail
+      || "Nao foi possivel atribuir a OS."
+    );
+    return;
+  }
+
+  alert(
+    `OS #${id} atribuida para ${nomeTecnico}.`
+  );
+
+  await carregarOrdens();
+}
+
 
 async function baixarPdfOrdem(id) {
   const r = await fetch(`${API_URL}/admin/ordens/${id}/pdf`, { headers: headers() });
@@ -933,7 +1120,7 @@ async function rotaCaboSelecionada(event) {
   const form = new FormData();
   form.append("arquivo", arquivo);
   await fetch(`${API_URL}/admin/clientes/${clienteRotaAlvo}/rota-cabo`, {
-    method: "POST", headers: { "X-Admin-Login": adminLogin, "X-Admin-Senha": adminSenha }, body: form,
+    method: "POST", headers: authHeaders(), body: form,
   });
   carregarClientes();
 }

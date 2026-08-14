@@ -1,11 +1,18 @@
 import os
+from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 # Por padrão usa SQLite (arquivo local, zero configuração).
 # Para produção no VPS, defina a variável de ambiente DATABASE_URL, ex:
 #   postgresql://usuario:senha@localhost/estoque_campo
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./estoque_campo.db")
+BASE_DIR = Path(__file__).resolve().parent
+SQLITE_PATH = BASE_DIR / "estoque_campo.db"
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"sqlite:///{SQLITE_PATH.as_posix()}",
+)
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, connect_args=connect_args)

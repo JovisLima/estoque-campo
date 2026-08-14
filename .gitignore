@@ -35,3 +35,13 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# Dados locais / runtime do backend
+backend/*.db
+backend/*.sqlite
+backend/*.sqlite3
+backend/fotos_os/
+backend/fotos_perfil/
+backend/relatorios/
+backend/rotas_cabo/
+backend/backups/
