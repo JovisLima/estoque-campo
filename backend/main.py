@@ -588,6 +588,10 @@ class OrdemAtribuir(BaseModel):
     observacoes: Optional[str] = None
 
 
+class OrdemAtribuirExistente(BaseModel):
+    tecnico_id: int
+
+
 class TecnicoCreate(BaseModel):
     nome: str
     login: str
@@ -2240,6 +2244,70 @@ def admin_atribuir_ordem(dados: OrdemAtribuir, db: Session = Depends(get_db)):
     db.add(ordem)
     db.commit()
     db.refresh(ordem)
+    return ordem
+
+
+@app.patch(
+    "/admin/ordens/{ordem_id}/atribuir",
+    response_model=OrdemOut,
+    dependencies=[Depends(exigir_papel())],
+)
+def admin_atribuir_ordem_existente(
+    ordem_id: int,
+    dados: OrdemAtribuirExistente,
+    db: Session = Depends(get_db),
+):
+    ordem = db.query(
+        models.OrdemServico
+    ).filter(
+        models.OrdemServico.id == ordem_id
+    ).first()
+
+    if not ordem:
+        raise HTTPException(
+            status_code=404,
+            detail="OS nao encontrada",
+        )
+
+    if ordem.status != models.StatusOS.pendente:
+        raise HTTPException(
+            status_code=409,
+            detail="Apenas OS pendente pode ser atribuida",
+        )
+
+    tecnico = db.query(
+        models.Tecnico
+    ).filter(
+        models.Tecnico.id == dados.tecnico_id,
+        models.Tecnico.ativo == True,
+    ).first()
+
+    if not tecnico:
+        raise HTTPException(
+            status_code=404,
+            detail="Tecnico nao encontrado ou inativo",
+        )
+
+    if not tecnico.aprovado:
+        raise HTTPException(
+            status_code=409,
+            detail="Tecnico ainda nao aprovado",
+        )
+
+    if ordem.tecnico_id is not None:
+        if ordem.tecnico_id == tecnico.id:
+            return ordem
+
+        raise HTTPException(
+            status_code=409,
+            detail="OS ja atribuida a outro tecnico",
+        )
+
+    ordem.tecnico_id = tecnico.id
+
+    db.commit()
+    db.refresh(ordem)
+
     return ordem
 
 
