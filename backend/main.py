@@ -2359,7 +2359,7 @@ def admin_listar_ordens(status: Optional[str] = None, cliente_id: Optional[int] 
             "id": o.id, "tipo": o.tipo, "cliente_local": o.cliente_local,
             "cliente_id": o.cliente_id,
             "nome_cliente": o.nome_cliente, "endereco": o.endereco, "prioridade": o.prioridade,
-            "status": o.status, "tecnico": o.tecnico.nome if o.tecnico else "Nao atribuido",
+            "status": o.status, "tecnico_id": o.tecnico_id, "tecnico": o.tecnico.nome if o.tecnico else "Nao atribuido",
             "criada_por_admin": o.criada_por_admin,
             "lat_inicio": o.lat_inicio, "lon_inicio": o.lon_inicio,
             "lat_fim": o.lat_fim, "lon_fim": o.lon_fim,

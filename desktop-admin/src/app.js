@@ -863,11 +863,25 @@ function formatarMinutos(min) {
 }
 
 async function carregarOrdens() {
+  if (tecnicosCache.length === 0) {
+    await carregarTecnicos();
+  }
+
   const url = filtroAtual ? `${API_URL}/admin/ordens?status=${filtroAtual}` : `${API_URL}/admin/ordens`;
   const r = await fetch(url, { headers: headers() });
   const ordens = await r.json();
 
   const iconeTipo = { preventiva: "🛠️ Preventiva", manutencao: "Manutenção", instalacao: "Instalação" };
+
+  const tecnicosAprovados = tecnicosCache.filter(
+    t => t.aprovado
+  );
+
+  const opcoesTecnicos = tecnicosAprovados
+    .map(
+      t => `<option value="${t.id}">${t.nome}</option>`
+    )
+    .join("");
 
   document.getElementById("tabela-ordens").innerHTML = ordens.map(o => `
     <tr style="${o.prioridade ? 'background:rgba(220,38,38,0.08);' : ''}">
@@ -888,10 +902,99 @@ async function carregarOrdens() {
         ${o.minutos_execucao !== null ? `🔧 ${formatarMinutos(o.minutos_execucao)}<br>` : ""}
         ${o.minutos_total !== null ? `<strong>Total: ${formatarMinutos(o.minutos_total)}</strong>` : "-"}
       </td>
-      <td>${o.tem_pdf ? `<button class="pequeno secundario" onclick="baixarPdfOrdem(${o.id})">📄 Baixar PDF</button>` : "-"}</td>
+      <td>
+        ${o.status === "pendente" && o.tecnico_id === null ? `
+          <select
+            id="atribuir-tecnico-${o.id}"
+            style="min-width:140px; margin-bottom:6px;"
+          >
+            <option value="">Escolha o tecnico</option>
+            ${opcoesTecnicos}
+          </select>
+          <button
+            class="pequeno"
+            onclick="atribuirOrdemExistente(${o.id})"
+          >
+            Atribuir
+          </button>
+        ` : ""}
+        ${o.tem_pdf
+          ? `<button class="pequeno secundario" onclick="baixarPdfOrdem(${o.id})">Baixar PDF</button>`
+          : (
+              o.status === "pendente"
+              && o.tecnico_id === null
+                ? ""
+                : "-"
+            )}
+      </td>
     </tr>
   `).join("");
 }
+
+async function atribuirOrdemExistente(id) {
+  const select = document.getElementById(
+    `atribuir-tecnico-${id}`
+  );
+
+  const tecnico_id = parseInt(
+    select?.value,
+    10
+  );
+
+  if (!tecnico_id) {
+    alert("Escolha o tecnico.");
+    return;
+  }
+
+  const tecnico = tecnicosCache.find(
+    t => t.id === tecnico_id
+  );
+
+  const nomeTecnico = tecnico?.nome || tecnico_id;
+
+  if (
+    !confirm(
+      `Atribuir a OS #${id} para ${nomeTecnico}?`
+    )
+  ) {
+    return;
+  }
+
+  const resposta = await fetch(
+    `${API_URL}/admin/ordens/${id}/atribuir`,
+    {
+      method: "PATCH",
+      headers: headers(),
+      body: JSON.stringify({
+        tecnico_id,
+      }),
+    }
+  );
+
+  let dados = {};
+
+  try {
+    dados = await resposta.json();
+  }
+  catch (_) {
+    dados = {};
+  }
+
+  if (!resposta.ok) {
+    alert(
+      dados.detail
+      || "Nao foi possivel atribuir a OS."
+    );
+    return;
+  }
+
+  alert(
+    `OS #${id} atribuida para ${nomeTecnico}.`
+  );
+
+  await carregarOrdens();
+}
+
 
 async function baixarPdfOrdem(id) {
   const r = await fetch(`${API_URL}/admin/ordens/${id}/pdf`, { headers: headers() });
