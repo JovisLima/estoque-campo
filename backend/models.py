@@ -223,7 +223,7 @@ class AvisoFerramenta(Base):
 class OrdemServico(Base):
     __tablename__ = "ordens_servico"
     id = Column(Integer, primary_key=True)
-    tecnico_id = Column(Integer, ForeignKey("tecnicos.id"), nullable=False)
+    tecnico_id = Column(Integer, ForeignKey("tecnicos.id"), nullable=True)
     cliente_id = Column(Integer, ForeignKey("clientes.id"), nullable=True)
     tipo = Column(Enum(TipoOS), nullable=False)
     cliente_local = Column(String, nullable=False)

@@ -229,7 +229,7 @@ def gerar_pdf_ordem(ordem: models.OrdemServico) -> str:
         linha("Endereco", ordem.endereco)
     if ordem.prioridade:
         linha("Prioridade", "SIM - Atendimento prioritario")
-    linha("Tecnico", ordem.tecnico.nome)
+    linha("Tecnico", ordem.tecnico.nome if ordem.tecnico else "Nao atribuido")
     if ordem.lat_inicio and ordem.lon_inicio:
         linha("Local de inicio", f"{ordem.lat_inicio:.6f}, {ordem.lon_inicio:.6f}")
     if ordem.lat_fim and ordem.lon_fim:
@@ -457,7 +457,7 @@ class OrdemOut(BaseModel):
     endereco: Optional[str] = None
     prioridade: bool = False
     status: str
-    tecnico_id: int
+    tecnico_id: Optional[int] = None
     data_abertura: datetime
 
     class Config:
@@ -1121,7 +1121,7 @@ def historico_cliente(cliente_id: int, db: Session = Depends(get_db)):
         "cliente": cliente.nome,
         "ordens": [
             {
-                "id": o.id, "tipo": o.tipo, "status": o.status, "tecnico": o.tecnico.nome,
+                "id": o.id, "tipo": o.tipo, "status": o.status, "tecnico": o.tecnico.nome if o.tecnico else "Nao atribuido",
                 "data_abertura": o.data_abertura, "data_fechamento": o.data_fechamento,
             }
             for o in ordens
@@ -2096,7 +2096,7 @@ def admin_listar_ordens(status: Optional[str] = None, cliente_id: Optional[int] 
             "id": o.id, "tipo": o.tipo, "cliente_local": o.cliente_local,
             "cliente_id": o.cliente_id,
             "nome_cliente": o.nome_cliente, "endereco": o.endereco, "prioridade": o.prioridade,
-            "status": o.status, "tecnico": o.tecnico.nome,
+            "status": o.status, "tecnico": o.tecnico.nome if o.tecnico else "Nao atribuido",
             "criada_por_admin": o.criada_por_admin,
             "lat_inicio": o.lat_inicio, "lon_inicio": o.lon_inicio,
             "lat_fim": o.lat_fim, "lon_fim": o.lon_fim,
