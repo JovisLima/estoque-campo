@@ -1340,6 +1340,88 @@ def criar_ordem(
     return ordem
 
 
+@app.post(
+    "/integracoes/aven-monitor/incidentes",
+    response_model=OrdemOut,
+    dependencies=[Depends(exigir_aven_monitor)],
+)
+def criar_ordem_incidente_monitor(
+    dados: MonitorIncidenteCreate,
+    db: Session = Depends(get_db),
+):
+    client_uuid = gerar_client_uuid_monitor(dados)
+
+    existente = db.query(
+        models.OrdemServico
+    ).filter_by(
+        client_uuid=client_uuid
+    ).first()
+
+    if existente:
+        return existente
+
+    observacoes = [
+        "OS criada automaticamente pelo AVEN Monitor.",
+        f"Tipo de incidente: {dados.tipo}",
+        f"Dispositivo: {dados.codigo}",
+        f"Local: {dados.local}",
+        f"Cidade: {dados.cidade}",
+        f"Fabricante: {dados.fabricante}",
+        f"Inicio observado: {dados.inicio.isoformat(timespec='seconds')}",
+    ]
+
+    if dados.tipo == "LINK":
+        observacoes.extend([
+            f"Link: {dados.link}",
+            f"Operadora: {dados.operadora}",
+            f"Papel: {dados.papel}",
+        ])
+    else:
+        observacoes.append(
+            f"Equipamento: {dados.equipamento}"
+        )
+
+    ordem = models.OrdemServico(
+        tecnico_id=None,
+        cliente_id=None,
+        tipo=models.TipoOS.manutencao,
+        cliente_local=dados.local,
+        nome_cliente=None,
+        endereco=None,
+        prioridade=False,
+        observacoes="\n".join(observacoes),
+        status=models.StatusOS.pendente,
+        criada_por_admin=False,
+        client_uuid=client_uuid,
+    )
+
+    db.add(ordem)
+
+    try:
+        db.commit()
+
+    except IntegrityError:
+        db.rollback()
+
+        existente = db.query(
+            models.OrdemServico
+        ).filter_by(
+            client_uuid=client_uuid
+        ).first()
+
+        if existente:
+            return existente
+
+        raise HTTPException(
+            status_code=409,
+            detail="Falha de idempotencia ao registrar incidente",
+        )
+
+    db.refresh(ordem)
+
+    return ordem
+
+
 @app.get("/tecnicos/{tecnico_id}/ordens-pendentes")
 def ordens_pendentes_do_tecnico(
     tecnico_id: int,
