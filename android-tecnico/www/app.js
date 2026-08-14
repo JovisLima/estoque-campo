@@ -1,6 +1,6 @@
 // ===== CONFIGURAÇÃO =====
 // Troque pela URL do seu backend no VPS, ex: "https://estoque.suaempresa.com.br"
-const API_URL = "http://localhost:8000";
+const API_URL = "http://10.0.2.2:8000";
 
 // ===== ESTADO LOCAL (persistido no celular) =====
 let tecnico = JSON.parse(localStorage.getItem("tecnico") || "null");
