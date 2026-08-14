@@ -1,4 +1,5 @@
 import os
+import secrets
 from pathlib import Path
 import base64
 import uuid as uuid_lib
@@ -9,7 +10,7 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from fpdf import FPDF
@@ -96,6 +97,8 @@ JWT_SECRET_KEY = os.getenv(
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "24"))
 
+AVEN_MONITOR_API_TOKEN = os.getenv("AVEN_MONITOR_API_TOKEN")
+
 
 def criar_token_tecnico(tecnico: models.Tecnico) -> str:
     agora = datetime.utcnow()
@@ -137,6 +140,42 @@ def criar_token_admin(admin: models.AdminUsuario) -> str:
         JWT_SECRET_KEY,
         algorithm=JWT_ALGORITHM,
     )
+
+
+monitor_bearer = HTTPBearer(auto_error=False)
+
+def exigir_aven_monitor(
+    credenciais: Optional[HTTPAuthorizationCredentials] = Depends(monitor_bearer),
+):
+    if not AVEN_MONITOR_API_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="Integracao AVEN Monitor nao configurada",
+        )
+
+    if credenciais is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Token do AVEN Monitor obrigatorio",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if credenciais.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=401,
+            detail="Tipo de autenticacao invalido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not secrets.compare_digest(
+        credenciais.credentials,
+        AVEN_MONITOR_API_TOKEN,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Token do AVEN Monitor invalido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 admin_bearer = HTTPBearer(auto_error=False)
@@ -446,6 +485,80 @@ class OrdemCreate(BaseModel):
     lat: Optional[float] = None
     lon: Optional[float] = None
     client_uuid: Optional[str] = None  # gerado no celular p/ evitar duplicidade ao sincronizar
+
+
+class MonitorIncidenteCreate(BaseModel):
+    tipo: str
+    dispositivo_id: str
+    codigo: str
+    local: str
+    cidade: str
+    fabricante: str
+    inicio: datetime
+
+    equipamento: Optional[str] = None
+    link: Optional[str] = None
+    operadora: Optional[str] = None
+    papel: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validar_tipo_incidente(self):
+        if self.tipo == "LINK":
+            if not self.link:
+                raise ValueError(
+                    "Incidente LINK exige link"
+                )
+
+            if not self.operadora:
+                raise ValueError(
+                    "Incidente LINK exige operadora"
+                )
+
+            if not self.papel:
+                raise ValueError(
+                    "Incidente LINK exige papel"
+                )
+
+        elif self.tipo == "DISPOSITIVO":
+            if not self.equipamento:
+                raise ValueError(
+                    "Incidente DISPOSITIVO exige equipamento"
+                )
+
+        else:
+            raise ValueError(
+                "tipo deve ser LINK ou DISPOSITIVO"
+            )
+
+        return self
+
+
+def gerar_client_uuid_monitor(
+    dados: MonitorIncidenteCreate,
+) -> str:
+    partes = [
+        "AVEN_MONITOR",
+        dados.tipo,
+        dados.dispositivo_id,
+    ]
+
+    if dados.tipo == "LINK":
+        partes.append(dados.link)
+
+    partes.append(
+        dados.inicio.isoformat(
+            timespec="seconds"
+        )
+    )
+
+    chave = "|".join(partes)
+
+    identificador = uuid_lib.uuid5(
+        uuid_lib.NAMESPACE_URL,
+        chave,
+    )
+
+    return f"monitor:{identificador}"
 
 
 class OrdemOut(BaseModel):
