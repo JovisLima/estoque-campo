@@ -1,18 +1,21 @@
 import os
 import secrets
+import json
 from pathlib import Path
 import base64
 import uuid as uuid_lib
-from datetime import datetime, timedelta
-from typing import Optional, List
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from typing import List, Optional, Union
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from fastapi import FastAPI, Depends, File, Header, HTTPException, UploadFile
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, model_validator
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fpdf import FPDF
 import bcrypt
 import jwt
@@ -21,87 +24,132 @@ import models
 from database import Base, engine, get_db
 from monitoring_routes import (
     criar_router_monitoramento,
+    publicar_configuracao_atual,
     resolver_origem_incidente,
 )
+from settings import settings
+from system_routes import criar_router_sistemico
+from system_services import (
+    hash_token,
+    janela_ativa_para_origem,
+)
+from audit import agora_utc, registrar_auditoria
+from storage import armazenamento
 
-Base.metadata.create_all(bind=engine)
+if settings.auto_create_schema:
+    Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Estoque de Campo API")
+app = FastAPI(
+    title="Estoque de Campo API",
+    docs_url="/docs" if settings.enable_api_docs else None,
+    redoc_url="/redoc" if settings.enable_api_docs else None,
+    openapi_url="/openapi.json" if settings.enable_api_docs else None,
+)
 
-PASTA_RELATORIOS = os.path.join(os.path.dirname(__file__), "relatorios")
-PASTA_FOTOS_PERFIL = os.path.join(os.path.dirname(__file__), "fotos_perfil")
-PASTA_FOTOS_OS = os.path.join(os.path.dirname(__file__), "fotos_os")
-PASTA_ROTAS_CABO = os.path.join(os.path.dirname(__file__), "rotas_cabo")
-os.makedirs(PASTA_RELATORIOS, exist_ok=True)
-os.makedirs(PASTA_FOTOS_PERFIL, exist_ok=True)
-os.makedirs(PASTA_ROTAS_CABO, exist_ok=True)
-os.makedirs(PASTA_FOTOS_OS, exist_ok=True)
 
-BASE_DIR = Path(__file__).resolve().parent
+class APIVersionAliasMiddleware:
+    """Expoe /api/v1 sem quebrar as rotas historicas dos clientes atuais."""
 
-PASTAS_ARQUIVOS = {
-    "fotos_perfil",
-    "rotas_cabo",
-    "fotos_os",
-    "relatorios",
+    def __init__(self, app, prefix: str = "/api/v1"):
+        self.app = app
+        self.prefix = prefix
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        caminho = scope.get("path", "")
+        versionada = caminho == self.prefix or caminho.startswith(
+            self.prefix + "/"
+        )
+        if versionada:
+            scope = dict(scope)
+            novo_caminho = caminho[len(self.prefix):] or "/"
+            scope["path"] = novo_caminho
+            scope["raw_path"] = novo_caminho.encode("utf-8")
+            scope["root_path"] = scope.get("root_path", "") + self.prefix
+
+        async def enviar(message):
+            if versionada and message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append((b"x-api-version", b"v1"))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, enviar)
+
+CODE_DIR = Path(__file__).resolve().parent
+
+TIPOS_IMAGEM = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
 }
 
 
-def resolver_caminho_arquivo(caminho):
-    if not caminho:
-        return None
+def detectar_tipo_imagem(conteudo: bytes) -> tuple[str, str]:
+    if conteudo.startswith(b"\xff\xd8\xff"):
+        tipo = "image/jpeg"
+    elif conteudo.startswith(b"\x89PNG\r\n\x1a\n"):
+        tipo = "image/png"
+    elif conteudo.startswith((b"GIF87a", b"GIF89a")):
+        tipo = "image/gif"
+    elif conteudo.startswith(b"RIFF") and conteudo[8:12] == b"WEBP":
+        tipo = "image/webp"
+    else:
+        raise HTTPException(415, "Formato de imagem nao permitido")
+    return tipo, TIPOS_IMAGEM[tipo]
 
-    bruto = str(caminho)
-    caminho_obj = Path(bruto)
 
-    # Se o caminho cont?m uma das pastas gerenciadas pelo projeto,
-    # prioriza sempre a c?pia que est? dentro do backend atual.
-    partes = bruto.replace("\\", "/").split("/")
-
-    for indice, parte in enumerate(partes):
-        if parte in PASTAS_ARQUIVOS:
-            candidato_atual = BASE_DIR.joinpath(*partes[indice:])
-
-            if candidato_atual.exists():
-                return candidato_atual
-
-    # Novo formato relativo.
-    if not caminho_obj.is_absolute():
-        return BASE_DIR / caminho_obj
-
-    # Compatibilidade tempor?ria com caminho absoluto antigo,
-    # caso o arquivo ainda n?o tenha sido migrado para o projeto atual.
-    if caminho_obj.exists():
-        return caminho_obj
-
-    return caminho_obj
+async def ler_upload_imagem(arquivo: UploadFile) -> tuple[bytes, str, str]:
+    conteudo = await arquivo.read(settings.max_upload_bytes + 1)
+    if len(conteudo) > settings.max_upload_bytes:
+        raise HTTPException(413, "Arquivo excede o limite permitido")
+    tipo, extensao = detectar_tipo_imagem(conteudo)
+    if arquivo.content_type and arquivo.content_type not in TIPOS_IMAGEM:
+        raise HTTPException(415, "Tipo de imagem nao permitido")
+    if arquivo.content_type and arquivo.content_type != tipo:
+        raise HTTPException(415, "Conteudo da imagem nao corresponde ao tipo informado")
+    return conteudo, tipo, extensao
 
 # Em produção, restrinja para o domínio do seu app
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=list(settings.cors_allowed_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Senha única do painel Admin/Desktop. TROQUE isso em produção definindo a
-# Senha do PRIMEIRO usuário admin (gerência), criado pelo seed.py. Depois
-# disso, todo controle de acesso é por login/senha individuais — veja
-# admin_usuarios no banco. Troque isso via variável de ambiente no VPS.
-ADMIN_SENHA_INICIAL = os.getenv("ADMIN_SENHA", "admin123")
-
-# JWT do aplicativo do t?cnico.
-# Desenvolvimento local: usa chave padr?o.
-# VPS: definir JWT_SECRET_KEY no ambiente.
-JWT_SECRET_KEY = os.getenv(
-    "JWT_SECRET_KEY",
-    "aven-local-development-change-in-vps"
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=list(settings.allowed_hosts),
 )
+app.add_middleware(APIVersionAliasMiddleware)
+
+JWT_SECRET_KEY = settings.jwt_secret_key
 
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "24"))
+JWT_EXPIRE_HOURS = settings.jwt_expire_hours
 
-AVEN_MONITOR_API_TOKEN = os.getenv("AVEN_MONITOR_API_TOKEN")
+AVEN_MONITOR_API_TOKEN = settings.aven_monitor_api_token
+
+
+@app.get("/health/live", include_in_schema=False)
+def health_live():
+    return {"status": "live"}
+
+
+@app.get("/health/ready", include_in_schema=False)
+def health_ready(db: Session = Depends(get_db)):
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception as erro:
+        raise HTTPException(
+            status_code=503,
+            detail="Banco de dados indisponivel",
+        ) from erro
+    return {"status": "ready", "database": "ok"}
 
 
 def criar_token_tecnico(tecnico: models.Tecnico) -> str:
@@ -150,13 +198,9 @@ monitor_bearer = HTTPBearer(auto_error=False)
 
 def exigir_aven_monitor(
     credenciais: Optional[HTTPAuthorizationCredentials] = Depends(monitor_bearer),
+    agente_codigo: Optional[str] = Header(default=None, alias="X-AVEN-Agent"),
+    db: Session = Depends(get_db),
 ):
-    if not AVEN_MONITOR_API_TOKEN:
-        raise HTTPException(
-            status_code=503,
-            detail="Integracao AVEN Monitor nao configurada",
-        )
-
     if credenciais is None:
         raise HTTPException(
             status_code=401,
@@ -171,15 +215,37 @@ def exigir_aven_monitor(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if not secrets.compare_digest(
-        credenciais.credentials,
-        AVEN_MONITOR_API_TOKEN,
-    ):
+    if agente_codigo:
+        agente = db.query(models.MonitorAgente).filter_by(
+            codigo=agente_codigo.strip().upper(),
+            ativo=True,
+        ).first()
+        if agente and secrets.compare_digest(
+            hash_token(credenciais.credentials),
+            agente.token_hash,
+        ):
+            return agente
         raise HTTPException(
             status_code=401,
-            detail="Token do AVEN Monitor invalido",
+            detail="Credencial individual do AVEN Monitor invalida",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    if (
+        settings.allow_legacy_monitor_token
+        and AVEN_MONITOR_API_TOKEN
+        and secrets.compare_digest(
+            credenciais.credentials,
+            AVEN_MONITOR_API_TOKEN,
+        )
+    ):
+        return None
+
+    raise HTTPException(
+        status_code=401,
+        detail="Informe X-AVEN-Agent e a credencial individual do agente",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 admin_bearer = HTTPBearer(auto_error=False)
@@ -237,6 +303,13 @@ app.include_router(
     criar_router_monitoramento(
         exigir_papel(),
         exigir_aven_monitor,
+    )
+)
+app.include_router(
+    criar_router_sistemico(
+        exigir_papel(),
+        exigir_aven_monitor,
+        publicar_configuracao_atual,
     )
 )
 
@@ -325,10 +398,6 @@ def gerar_pdf_ordem(ordem: models.OrdemServico) -> str:
         x, y = 10, pdf.get_y()
         largura_foto = 90
         for i, foto in enumerate(ordem.fotos):
-            caminho_foto = resolver_caminho_arquivo(foto.caminho)
-
-            if not caminho_foto or not caminho_foto.exists():
-                continue
             coluna = i % 2
             if coluna == 0 and i > 0:
                 y += 75
@@ -337,18 +406,25 @@ def gerar_pdf_ordem(ordem: models.OrdemServico) -> str:
                 y = 20
             pos_x = 10 if coluna == 0 else 110
             try:
-                pdf.image(str(caminho_foto), x=pos_x, y=y, w=largura_foto)
+                with armazenamento.materializar(foto.caminho) as caminho_foto:
+                    pdf.image(
+                        str(caminho_foto),
+                        x=pos_x,
+                        y=y,
+                        w=largura_foto,
+                    )
             except Exception:
                 pass
 
     nome_arquivo = f"os_{ordem.id}.pdf"
 
-    caminho_absoluto = Path(PASTA_RELATORIOS) / nome_arquivo
     caminho_relativo = Path("relatorios") / nome_arquivo
-
-    pdf.output(str(caminho_absoluto))
-
-    return caminho_relativo.as_posix()
+    conteudo = bytes(pdf.output())
+    return armazenamento.salvar_bytes(
+        caminho_relativo,
+        conteudo,
+        "application/pdf",
+    )
 
 
 # ---------- Schemas ----------
@@ -596,6 +672,13 @@ class OrdemOut(BaseModel):
         from_attributes = True
 
 
+class MonitorIncidenteSuprimidoOut(BaseModel):
+    suprimido: bool = True
+    status: str
+    motivo: str
+    janela_id: int
+
+
 class OrdemAtribuir(BaseModel):
     tecnico_id: int
     tipo: str
@@ -673,7 +756,12 @@ class MaterialCreate(BaseModel):
     unidade: str = "un"
     qtd_atual: float = Field(default=0, ge=0)
     qtd_minima: float = Field(default=0, ge=0)
-    custo_unitario: float = Field(default=0, ge=0)
+    custo_unitario: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+        max_digits=14,
+        decimal_places=4,
+    )
 
 
 class FerramentaCreate(BaseModel):
@@ -704,7 +792,7 @@ class SolicitacaoCreate(BaseModel):
 
 
 class FotoOrdemCreate(BaseModel):
-    imagem_base64: str
+    imagem_base64: str = Field(max_length=settings.max_upload_bytes * 2)
     client_uuid: Optional[str] = None
 
 
@@ -1190,20 +1278,14 @@ def ver_rota_cabo(
         db,
     )
 
-    caminho_rota = resolver_caminho_arquivo(
+    if not cliente.imagem_rota_cabo or not armazenamento.existe(
         cliente.imagem_rota_cabo
-    )
-
-    if (
-        not caminho_rota
-        or not caminho_rota.exists()
     ):
         raise HTTPException(
             status_code=404,
             detail="Sem imagem de rota cadastrada",
         )
-
-    return FileResponse(str(caminho_rota))
+    return armazenamento.resposta(cliente.imagem_rota_cabo)
 
 
 # ---------- Clientes (cadastro central, com foto da rota do cabo) ----------
@@ -1227,18 +1309,16 @@ async def upload_rota_cabo(cliente_id: int, arquivo: UploadFile = File(...), db:
     cliente = db.query(models.Cliente).get(cliente_id)
     if not cliente:
         raise HTTPException(404, "Cliente não encontrado")
-    extensao = os.path.splitext(arquivo.filename or "rota.jpg")[1] or ".jpg"
+    conteudo, tipo_imagem, extensao = await ler_upload_imagem(arquivo)
     nome_arquivo = f"cliente_{cliente_id}{extensao}"
 
-    caminho_absoluto = Path(PASTA_ROTAS_CABO) / nome_arquivo
     caminho_relativo = Path("rotas_cabo") / nome_arquivo
 
-    conteudo = await arquivo.read()
-
-    with open(caminho_absoluto, "wb") as f:
-        f.write(conteudo)
-
-    cliente.imagem_rota_cabo = caminho_relativo.as_posix()
+    cliente.imagem_rota_cabo = armazenamento.salvar_bytes(
+        caminho_relativo,
+        conteudo,
+        tipo_imagem,
+    )
     db.commit()
     return {"status": "ok"}
 
@@ -1365,14 +1445,20 @@ def criar_ordem(
 
 @app.post(
     "/integracoes/aven-monitor/incidentes",
-    response_model=OrdemOut,
-    dependencies=[Depends(exigir_aven_monitor)],
+    response_model=Union[OrdemOut, MonitorIncidenteSuprimidoOut],
 )
 def criar_ordem_incidente_monitor(
     dados: MonitorIncidenteCreate,
     db: Session = Depends(get_db),
+    agente=Depends(exigir_aven_monitor),
 ):
     client_uuid = gerar_client_uuid_monitor(dados)
+
+    evento_existente = db.query(
+        models.MonitorEventoOcorrencia
+    ).filter_by(chave_evento=client_uuid).first()
+    if evento_existente:
+        return evento_existente.ocorrencia.ordem
 
     existente = db.query(
         models.OrdemServico
@@ -1387,6 +1473,29 @@ def criar_ordem_incidente_monitor(
         db,
         dados,
     )
+
+    janela = janela_ativa_para_origem(db, origem)
+    if janela:
+        registrar_auditoria(
+            db,
+            ator=agente,
+            acao="SUPRIMIR_INCIDENTE_MANUTENCAO",
+            entidade_tipo="MONITOR_JANELA",
+            entidade_id=janela.id,
+            depois={
+                "evento": client_uuid,
+                "tipo": dados.tipo,
+                "dispositivo": dados.dispositivo_codigo,
+                "link": dados.link_codigo,
+            },
+        )
+        db.commit()
+        return {
+            "suprimido": True,
+            "status": "MANUTENCAO",
+            "motivo": janela.motivo,
+            "janela_id": janela.id,
+        }
 
     observacoes = [
         "OS criada automaticamente pelo AVEN Monitor.",
@@ -1435,6 +1544,89 @@ def criar_ordem_incidente_monitor(
                 f"Link codigo: {origem['link'].codigo}"
             )
 
+        limite = dados.inicio - timedelta(
+            seconds=settings.monitor_correlation_window_seconds
+        )
+        limite_superior = dados.inicio + timedelta(
+            seconds=settings.monitor_correlation_window_seconds
+        )
+        raiz = db.query(models.MonitorOcorrencia).join(
+            models.OrdemServico,
+            models.OrdemServico.id == models.MonitorOcorrencia.ordem_id,
+        ).filter(
+            models.MonitorOcorrencia.unidade_id == unidade.id,
+            models.MonitorOcorrencia.ultima_ocorrencia_em >= limite,
+            models.MonitorOcorrencia.ultima_ocorrencia_em <= limite_superior,
+            models.OrdemServico.status != models.StatusOS.fechada,
+        ).order_by(
+            models.MonitorOcorrencia.ultima_ocorrencia_em.desc()
+        ).first()
+
+        if raiz:
+            evento = models.MonitorEventoOcorrencia(
+                ocorrencia_id=raiz.id,
+                dispositivo_id=dispositivo.id,
+                link_id=origem["link"].id if origem["link"] else None,
+                chave_evento=client_uuid,
+                tipo=dados.tipo,
+                inicio=dados.inicio,
+                payload=json.dumps(
+                    dados.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                criado_em=agora_utc(),
+            )
+            db.add(evento)
+            raiz.ultima_ocorrencia_em = max(
+                raiz.ultima_ocorrencia_em,
+                dados.inicio,
+            )
+            if dados.tipo == "DISPOSITIVO":
+                raiz.causa_provavel = "DISPOSITIVO_OU_ENERGIA"
+            else:
+                links = {
+                    item.link_id
+                    for item in raiz.eventos
+                    if item.link_id is not None
+                }
+                links.add(origem["link"].id)
+                raiz.causa_provavel = (
+                    "INFRAESTRUTURA_COMUM"
+                    if len(links) >= 2
+                    else "LINK_ISOLADO"
+                )
+            raiz.ordem.observacoes = (
+                (raiz.ordem.observacoes or "")
+                + "\n"
+                + f"Sintoma correlacionado: {dados.tipo} "
+                + f"{dados.link_codigo or dados.dispositivo_codigo} "
+                + f"em {dados.inicio.isoformat(timespec='seconds')}."
+            )
+            registrar_auditoria(
+                db,
+                ator=agente,
+                acao="CORRELACIONAR_INCIDENTE",
+                entidade_tipo="MONITOR_OCORRENCIA",
+                entidade_id=raiz.id,
+                depois={
+                    "evento": client_uuid,
+                    "causa_provavel": raiz.causa_provavel,
+                    "ordem_id": raiz.ordem_id,
+                },
+            )
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                existente = db.query(
+                    models.MonitorEventoOcorrencia
+                ).filter_by(chave_evento=client_uuid).first()
+                if existente:
+                    return existente.ocorrencia.ordem
+                raise
+            return raiz.ordem
+
     ordem = models.OrdemServico(
         tecnico_id=None,
         cliente_id=cliente_id,
@@ -1454,7 +1646,7 @@ def criar_ordem_incidente_monitor(
     try:
         if origem:
             db.flush()
-            db.add(models.MonitorOcorrencia(
+            ocorrencia = models.MonitorOcorrencia(
                 ordem_id=ordem.id,
                 unidade_id=origem["unidade"].id,
                 dispositivo_id=origem["dispositivo"].id,
@@ -1465,19 +1657,60 @@ def criar_ordem_incidente_monitor(
                 ),
                 tipo=dados.tipo,
                 inicio=dados.inicio,
+                ultima_ocorrencia_em=dados.inicio,
+                causa_provavel=(
+                    "DISPOSITIVO_OU_ENERGIA"
+                    if dados.tipo == "DISPOSITIVO"
+                    else "LINK_ISOLADO"
+                ),
+            )
+            db.add(ocorrencia)
+            db.flush()
+            db.add(models.MonitorEventoOcorrencia(
+                ocorrencia_id=ocorrencia.id,
+                dispositivo_id=origem["dispositivo"].id,
+                link_id=(
+                    origem["link"].id
+                    if origem["link"]
+                    else None
+                ),
+                chave_evento=client_uuid,
+                tipo=dados.tipo,
+                inicio=dados.inicio,
+                payload=json.dumps(
+                    dados.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                criado_em=agora_utc(),
             ))
+            registrar_auditoria(
+                db,
+                ator=agente,
+                acao="CRIAR_INCIDENTE_RAIZ",
+                entidade_tipo="MONITOR_OCORRENCIA",
+                entidade_id=ocorrencia.id,
+                depois={
+                    "evento": client_uuid,
+                    "ordem_id": ordem.id,
+                    "causa_provavel": ocorrencia.causa_provavel,
+                },
+            )
 
         db.commit()
 
     except IntegrityError:
         db.rollback()
 
-        existente = db.query(
-            models.OrdemServico
-        ).filter_by(
+        evento_existente = db.query(
+            models.MonitorEventoOcorrencia
+        ).filter_by(chave_evento=client_uuid).first()
+        if evento_existente:
+            return evento_existente.ocorrencia.ordem
+
+        existente = db.query(models.OrdemServico).filter_by(
             client_uuid=client_uuid
         ).first()
-
         if existente:
             return existente
 
@@ -1676,17 +1909,27 @@ def anexar_foto_ordem(ordem_id: int, dados: FotoOrdemCreate, db: Session = Depen
             detail="Esta OS pertence a outro tecnico",
         )
     try:
-        dados_binarios = base64.b64decode(dados.imagem_base64.split(",")[-1])
+        dados_binarios = base64.b64decode(
+            dados.imagem_base64.split(",")[-1],
+            validate=True,
+        )
     except Exception:
         raise HTTPException(400, "Imagem em base64 inválida")
 
-    nome_arquivo = f"os_{ordem_id}_{dados.client_uuid or uuid_lib.uuid4().hex}.jpg"
+    if len(dados_binarios) > settings.max_upload_bytes:
+        raise HTTPException(413, "Imagem excede o limite permitido")
+    tipo_imagem, extensao = detectar_tipo_imagem(dados_binarios)
 
-    caminho_absoluto = Path(PASTA_FOTOS_OS) / nome_arquivo
+    nome_arquivo = (
+        f"os_{ordem_id}_{dados.client_uuid or uuid_lib.uuid4().hex}{extensao}"
+    )
+
     caminho_relativo = Path("fotos_os") / nome_arquivo
-
-    with open(caminho_absoluto, "wb") as f:
-        f.write(dados_binarios)
+    armazenamento.salvar_bytes(
+        caminho_relativo,
+        dados_binarios,
+        tipo_imagem,
+    )
 
     foto = models.FotoOrdem(
         ordem_id=ordem_id,
@@ -1710,16 +1953,9 @@ def ver_foto_ordem(ordem_id: int, foto_id: int, db: Session = Depends(get_db)):
         ordem_id=ordem_id,
     ).first()
 
-    caminho_foto = (
-        resolver_caminho_arquivo(foto.caminho)
-        if foto
-        else None
-    )
-
-    if not foto or not caminho_foto or not caminho_foto.exists():
+    if not foto or not armazenamento.existe(foto.caminho):
         raise HTTPException(404, "Foto n?o encontrada")
-
-    return FileResponse(str(caminho_foto))
+    return armazenamento.resposta(foto.caminho)
 
 
 @app.get("/ordens/{ordem_id}")
@@ -2006,7 +2242,11 @@ def listar_admin_usuarios(db: Session = Depends(get_db)):
 
 
 @app.post("/admin/usuarios", response_model=AdminUsuarioOut, dependencies=[Depends(exigir_papel())])
-def criar_admin_usuario(dados: AdminUsuarioCreate, db: Session = Depends(get_db)):
+def criar_admin_usuario(
+    dados: AdminUsuarioCreate,
+    db: Session = Depends(get_db),
+    admin=Depends(exigir_papel()),
+):
     if dados.papel not in ("gerencia", "almoxarifado"):
         raise HTTPException(400, "Papel inválido")
     if db.query(models.AdminUsuario).filter_by(login=dados.login).first():
@@ -2017,30 +2257,95 @@ def criar_admin_usuario(dados: AdminUsuarioCreate, db: Session = Depends(get_db)
         papel=dados.papel,
     )
     db.add(usuario)
+    db.flush()
+    registrar_auditoria(
+        db,
+        ator=admin,
+        acao="CRIAR_ADMIN",
+        entidade_tipo="ADMIN_USUARIO",
+        entidade_id=usuario.id,
+        depois={"login": usuario.login, "papel": dados.papel},
+    )
     db.commit()
     db.refresh(usuario)
     return usuario
 
 
 @app.post("/admin/usuarios/{usuario_id}/papel", response_model=AdminUsuarioOut, dependencies=[Depends(exigir_papel())])
-def alterar_papel_admin(usuario_id: int, dados: AdminUsuarioPapel, db: Session = Depends(get_db)):
+def alterar_papel_admin(
+    usuario_id: int,
+    dados: AdminUsuarioPapel,
+    db: Session = Depends(get_db),
+    admin=Depends(exigir_papel()),
+):
     if dados.papel not in ("gerencia", "almoxarifado"):
         raise HTTPException(400, "Papel inválido")
-    usuario = db.query(models.AdminUsuario).get(usuario_id)
+    usuario = db.get(models.AdminUsuario, usuario_id)
     if not usuario:
         raise HTTPException(404, "Usuário não encontrado")
+    papel_anterior = (
+        usuario.papel.value
+        if hasattr(usuario.papel, "value")
+        else str(usuario.papel)
+    )
+    if papel_anterior == "gerencia" and dados.papel != "gerencia":
+        outras_gerencias = db.query(models.AdminUsuario).filter(
+            models.AdminUsuario.id != usuario.id,
+            models.AdminUsuario.ativo.is_(True),
+            models.AdminUsuario.papel == models.PapelAdmin.gerencia,
+        ).count()
+        if outras_gerencias == 0:
+            raise HTTPException(409, "Mantenha ao menos uma gerencia ativa")
     usuario.papel = dados.papel
+    registrar_auditoria(
+        db,
+        ator=admin,
+        acao="ALTERAR_PAPEL_ADMIN",
+        entidade_tipo="ADMIN_USUARIO",
+        entidade_id=usuario.id,
+        antes={"papel": papel_anterior},
+        depois={"papel": dados.papel},
+    )
     db.commit()
     db.refresh(usuario)
     return usuario
 
 
 @app.post("/admin/usuarios/{usuario_id}/ativo", response_model=AdminUsuarioOut, dependencies=[Depends(exigir_papel())])
-def alterar_ativo_admin(usuario_id: int, dados: AdminUsuarioAtivo, db: Session = Depends(get_db)):
-    usuario = db.query(models.AdminUsuario).get(usuario_id)
+def alterar_ativo_admin(
+    usuario_id: int,
+    dados: AdminUsuarioAtivo,
+    db: Session = Depends(get_db),
+    admin=Depends(exigir_papel()),
+):
+    usuario = db.get(models.AdminUsuario, usuario_id)
     if not usuario:
         raise HTTPException(404, "Usuário não encontrado")
+    if usuario.id == admin.id and not dados.ativo:
+        raise HTTPException(409, "Nao e permitido desativar a propria conta")
+    if (
+        usuario.ativo
+        and not dados.ativo
+        and usuario.papel == models.PapelAdmin.gerencia
+    ):
+        outras_gerencias = db.query(models.AdminUsuario).filter(
+            models.AdminUsuario.id != usuario.id,
+            models.AdminUsuario.ativo.is_(True),
+            models.AdminUsuario.papel == models.PapelAdmin.gerencia,
+        ).count()
+        if outras_gerencias == 0:
+            raise HTTPException(409, "Mantenha ao menos uma gerencia ativa")
+    anterior = usuario.ativo
     usuario.ativo = dados.ativo
+    registrar_auditoria(
+        db,
+        ator=admin,
+        acao="ALTERAR_ATIVO_ADMIN",
+        entidade_tipo="ADMIN_USUARIO",
+        entidade_id=usuario.id,
+        antes={"ativo": anterior},
+        depois={"ativo": usuario.ativo},
+    )
     db.commit()
     db.refresh(usuario)
     return usuario
@@ -2051,8 +2356,8 @@ def alterar_ativo_admin(usuario_id: int, dados: AdminUsuarioAtivo, db: Session =
 class ContaFinanceiraCreate(BaseModel):
     tipo: str  # "pagar" | "receber"
     descricao: str
-    valor: float
-    vencimento: str  # "AAAA-MM-DD"
+    valor: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
+    vencimento: date
     categoria: Optional[str] = None
     observacoes: Optional[str] = None
 
@@ -2065,7 +2370,7 @@ def listar_financeiro(tipo: Optional[str] = None, status: Optional[str] = None, 
     if status:
         query = query.filter_by(status=status)
     contas = query.order_by(models.ContaFinanceira.vencimento).all()
-    hoje = datetime.utcnow().strftime("%Y-%m-%d")
+    hoje = date.today()
     return [
         {
             "id": c.id, "tipo": c.tipo, "descricao": c.descricao, "valor": c.valor,
@@ -2080,10 +2385,10 @@ def listar_financeiro(tipo: Optional[str] = None, status: Optional[str] = None, 
 @app.get("/admin/financeiro/resumo", dependencies=[Depends(exigir_papel())])
 def resumo_financeiro(db: Session = Depends(get_db)):
     contas = db.query(models.ContaFinanceira).all()
-    hoje = datetime.utcnow().strftime("%Y-%m-%d")
+    hoje = date.today()
 
     def soma(tipo, status=None, atrasada=None):
-        total = 0
+        total = Decimal("0.00")
         for c in contas:
             if c.tipo != tipo:
                 continue
@@ -2092,7 +2397,7 @@ def resumo_financeiro(db: Session = Depends(get_db)):
             if atrasada is True and not (c.status == models.StatusConta.pendente and c.vencimento < hoje):
                 continue
             total += c.valor
-        return round(total, 2)
+        return total.quantize(Decimal("0.01"))
 
     return {
         "a_pagar_pendente": soma("pagar", models.StatusConta.pendente),
@@ -2103,33 +2408,74 @@ def resumo_financeiro(db: Session = Depends(get_db)):
 
 
 @app.post("/admin/financeiro", dependencies=[Depends(exigir_papel())])
-def criar_conta_financeira(dados: ContaFinanceiraCreate, db: Session = Depends(get_db)):
+def criar_conta_financeira(
+    dados: ContaFinanceiraCreate,
+    db: Session = Depends(get_db),
+    admin=Depends(exigir_papel()),
+):
     if dados.tipo not in ("pagar", "receber"):
         raise HTTPException(400, "Tipo inválido")
     conta = models.ContaFinanceira(**dados.model_dump())
     db.add(conta)
+    db.flush()
+    registrar_auditoria(
+        db,
+        ator=admin,
+        acao="CRIAR_CONTA",
+        entidade_tipo="CONTA_FINANCEIRA",
+        entidade_id=conta.id,
+        depois=dados.model_dump(mode="json"),
+    )
     db.commit()
     db.refresh(conta)
     return {"status": "ok", "id": conta.id}
 
 
 @app.post("/admin/financeiro/{conta_id}/marcar-pago", dependencies=[Depends(exigir_papel())])
-def marcar_conta_paga(conta_id: int, db: Session = Depends(get_db)):
+def marcar_conta_paga(
+    conta_id: int,
+    db: Session = Depends(get_db),
+    admin=Depends(exigir_papel()),
+):
     conta = db.query(models.ContaFinanceira).get(conta_id)
     if not conta:
         raise HTTPException(404, "Conta não encontrada")
+    anterior = conta.status
     conta.status = models.StatusConta.pago
-    conta.data_pagamento = datetime.utcnow().strftime("%Y-%m-%d")
+    conta.data_pagamento = date.today()
+    registrar_auditoria(
+        db,
+        ator=admin,
+        acao="PAGAR_CONTA",
+        entidade_tipo="CONTA_FINANCEIRA",
+        entidade_id=conta.id,
+        antes={"status": anterior},
+        depois={"status": conta.status, "data_pagamento": conta.data_pagamento},
+    )
     db.commit()
     return {"status": "ok"}
 
 
 @app.post("/admin/financeiro/{conta_id}/cancelar", dependencies=[Depends(exigir_papel())])
-def cancelar_conta_financeira(conta_id: int, db: Session = Depends(get_db)):
+def cancelar_conta_financeira(
+    conta_id: int,
+    db: Session = Depends(get_db),
+    admin=Depends(exigir_papel()),
+):
     conta = db.query(models.ContaFinanceira).get(conta_id)
     if not conta:
         raise HTTPException(404, "Conta não encontrada")
+    anterior = conta.status
     conta.status = models.StatusConta.cancelado
+    registrar_auditoria(
+        db,
+        ator=admin,
+        acao="CANCELAR_CONTA",
+        entidade_tipo="CONTA_FINANCEIRA",
+        entidade_id=conta.id,
+        antes={"status": anterior},
+        depois={"status": conta.status},
+    )
     db.commit()
     return {"status": "ok"}
 
@@ -2145,7 +2491,11 @@ def admin_listar_tecnicos_pendentes(db: Session = Depends(get_db)):
 
 
 @app.post("/admin/tecnicos", response_model=TecnicoOut, dependencies=[Depends(exigir_papel())])
-def admin_criar_tecnico(dados: TecnicoCreate, db: Session = Depends(get_db)):
+def admin_criar_tecnico(
+    dados: TecnicoCreate,
+    db: Session = Depends(get_db),
+    admin=Depends(exigir_papel()),
+):
     if db.query(models.Tecnico).filter_by(login=dados.login).first():
         raise HTTPException(409, "Já existe um técnico com esse login")
     tecnico = models.Tecnico(
@@ -2155,42 +2505,92 @@ def admin_criar_tecnico(dados: TecnicoCreate, db: Session = Depends(get_db)):
         is_adm=dados.is_adm, telefone=dados.telefone, data_contratacao=dados.data_contratacao,
     )
     db.add(tecnico)
+    db.flush()
+    registrar_auditoria(
+        db,
+        ator=admin,
+        acao="CRIAR_TECNICO",
+        entidade_tipo="TECNICO",
+        entidade_id=tecnico.id,
+        depois={"login": tecnico.login, "is_adm": tecnico.is_adm},
+    )
     db.commit()
     db.refresh(tecnico)
     return tecnico
 
 
 @app.post("/admin/tecnicos/{tecnico_id}/aprovar", response_model=TecnicoOut, dependencies=[Depends(exigir_papel())])
-def admin_aprovar_tecnico(tecnico_id: int, db: Session = Depends(get_db)):
+def admin_aprovar_tecnico(
+    tecnico_id: int,
+    db: Session = Depends(get_db),
+    admin=Depends(exigir_papel()),
+):
     tecnico = db.query(models.Tecnico).get(tecnico_id)
     if not tecnico:
         raise HTTPException(404, "Técnico não encontrado")
+    anterior = tecnico.aprovado
     tecnico.aprovado = True
+    registrar_auditoria(
+        db,
+        ator=admin,
+        acao="APROVAR_TECNICO",
+        entidade_tipo="TECNICO",
+        entidade_id=tecnico.id,
+        antes={"aprovado": anterior},
+        depois={"aprovado": True},
+    )
     db.commit()
     db.refresh(tecnico)
     return tecnico
 
 
 @app.post("/admin/tecnicos/{tecnico_id}/permissao", response_model=TecnicoOut, dependencies=[Depends(exigir_papel())])
-def admin_alterar_permissao(tecnico_id: int, dados: TecnicoPermissao, db: Session = Depends(get_db)):
+def admin_alterar_permissao(
+    tecnico_id: int,
+    dados: TecnicoPermissao,
+    db: Session = Depends(get_db),
+    admin=Depends(exigir_papel()),
+):
     """Define se o técnico é ADM (pode abrir OS avulsa) ou não."""
     tecnico = db.query(models.Tecnico).get(tecnico_id)
     if not tecnico:
         raise HTTPException(404, "Técnico não encontrado")
+    anterior = tecnico.is_adm
     tecnico.is_adm = dados.is_adm
+    registrar_auditoria(
+        db,
+        ator=admin,
+        acao="ALTERAR_PERMISSAO_TECNICO",
+        entidade_tipo="TECNICO",
+        entidade_id=tecnico.id,
+        antes={"is_adm": anterior},
+        depois={"is_adm": tecnico.is_adm},
+    )
     db.commit()
     db.refresh(tecnico)
     return tecnico
 
 
 @app.post("/admin/tecnicos/{tecnico_id}/resetar-pin", dependencies=[Depends(exigir_papel())])
-def admin_resetar_pin(tecnico_id: int, dados: ResetarPin, db: Session = Depends(get_db)):
+def admin_resetar_pin(
+    tecnico_id: int,
+    dados: ResetarPin,
+    db: Session = Depends(get_db),
+    admin=Depends(exigir_papel()),
+):
     tecnico = db.query(models.Tecnico).get(tecnico_id)
     if not tecnico:
         raise HTTPException(404, "Técnico não encontrado")
     if not dados.novo_pin or len(dados.novo_pin) < 4:
         raise HTTPException(400, "O PIN precisa ter pelo menos 4 dígitos")
     tecnico.pin_hash = bcrypt.hashpw(dados.novo_pin.encode(), bcrypt.gensalt()).decode()
+    registrar_auditoria(
+        db,
+        ator=admin,
+        acao="RESETAR_PIN_TECNICO",
+        entidade_tipo="TECNICO",
+        entidade_id=tecnico.id,
+    )
     db.commit()
     return {"status": "ok"}
 
@@ -2200,18 +2600,16 @@ async def admin_upload_foto_perfil(tecnico_id: int, arquivo: UploadFile = File(.
     tecnico = db.query(models.Tecnico).get(tecnico_id)
     if not tecnico:
         raise HTTPException(404, "Técnico não encontrado")
-    extensao = os.path.splitext(arquivo.filename or "foto.jpg")[1] or ".jpg"
+    conteudo, tipo_imagem, extensao = await ler_upload_imagem(arquivo)
     nome_arquivo = f"tecnico_{tecnico_id}{extensao}"
 
-    caminho_absoluto = Path(PASTA_FOTOS_PERFIL) / nome_arquivo
     caminho_relativo = Path("fotos_perfil") / nome_arquivo
 
-    conteudo = await arquivo.read()
-
-    with open(caminho_absoluto, "wb") as f:
-        f.write(conteudo)
-
-    tecnico.foto_perfil = caminho_relativo.as_posix()
+    tecnico.foto_perfil = armazenamento.salvar_bytes(
+        caminho_relativo,
+        conteudo,
+        tipo_imagem,
+    )
     db.commit()
     return {"status": "ok"}
 
@@ -2226,23 +2624,17 @@ def ver_foto_perfil(
 ):
     tecnico = db.query(models.Tecnico).get(tecnico_id)
 
-    caminho_foto = (
-        resolver_caminho_arquivo(tecnico.foto_perfil)
-        if tecnico
-        else None
-    )
-
     if (
         not tecnico
-        or not caminho_foto
-        or not caminho_foto.exists()
+        or not tecnico.foto_perfil
+        or not armazenamento.existe(tecnico.foto_perfil)
     ):
         raise HTTPException(
             status_code=404,
             detail="Sem foto de perfil",
         )
 
-    return FileResponse(str(caminho_foto))
+    return armazenamento.resposta(tecnico.foto_perfil)
 
 
 @app.get(
@@ -2255,23 +2647,17 @@ def admin_ver_foto_perfil(
 ):
     tecnico = db.query(models.Tecnico).get(tecnico_id)
 
-    caminho_foto = (
-        resolver_caminho_arquivo(tecnico.foto_perfil)
-        if tecnico
-        else None
-    )
-
     if (
         not tecnico
-        or not caminho_foto
-        or not caminho_foto.exists()
+        or not tecnico.foto_perfil
+        or not armazenamento.existe(tecnico.foto_perfil)
     ):
         raise HTTPException(
             status_code=404,
             detail="Sem foto de perfil",
         )
 
-    return FileResponse(str(caminho_foto))
+    return armazenamento.resposta(tecnico.foto_perfil)
 
 
 @app.get("/tecnicos/{tecnico_id}/perfil", response_model=TecnicoOut)
@@ -2380,17 +2766,15 @@ def admin_atribuir_ordem_existente(
 def baixar_pdf_ordem(ordem_id: int, db: Session = Depends(get_db)):
     ordem = db.query(models.OrdemServico).get(ordem_id)
 
-    caminho_pdf = (
-        resolver_caminho_arquivo(ordem.pdf_path)
-        if ordem and ordem.pdf_path
-        else None
-    )
-
-    if not ordem or not caminho_pdf or not caminho_pdf.exists():
+    if (
+        not ordem
+        or not ordem.pdf_path
+        or not armazenamento.existe(ordem.pdf_path)
+    ):
         raise HTTPException(404, "PDF n?o dispon?vel pra essa OS")
 
-    return FileResponse(
-        str(caminho_pdf),
+    return armazenamento.resposta(
+        ordem.pdf_path,
         media_type="application/pdf",
         filename=f"OS_{ordem.id}.pdf",
     )

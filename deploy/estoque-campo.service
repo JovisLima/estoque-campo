@@ -1,16 +1,37 @@
 [Unit]
 Description=Aven Connect - Backend Estoque de Campo
-After=network.target postgresql.service
+Wants=network-online.target
+After=network-online.target postgresql.service
+Requires=postgresql.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
-User=www-data
-Group=www-data
+User=lima
+Group=lima
 WorkingDirectory=/opt/estoque-campo/backend
-EnvironmentFile=/opt/estoque-campo/backend/.env
+EnvironmentFile=/etc/aven/estoque-campo.env
+StateDirectory=estoque-campo
+UMask=0077
+ExecStartPre=/opt/estoque-campo/backend/venv/bin/alembic -c /opt/estoque-campo/backend/alembic.ini upgrade head
+ExecStartPre=/opt/estoque-campo/backend/venv/bin/python /opt/estoque-campo/backend/preflight.py
 ExecStart=/opt/estoque-campo/backend/venv/bin/gunicorn main:app -w 2 -k uvicorn.workers.UvicornWorker -b 127.0.0.1:8000
-Restart=always
+Restart=on-failure
 RestartSec=5
+TimeoutStartSec=180
+TimeoutStopSec=45
+KillSignal=SIGQUIT
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target

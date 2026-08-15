@@ -40,7 +40,9 @@ O painel agora tem login individual por usuário (não é mais uma senha
   usuários do painel.
 
 O primeiro usuário (`admin`, papel gerência) é criado pelo `seed.py`. A
-partir dele, crie os outros pela aba "Usuários do painel".
+partir dele, crie os outros pela aba "Usuários do painel". O backend impede a
+desativação da própria conta e a remoção da última Gerência ativa; mudanças de
+papel, técnicos, financeiro e monitoramento entram na trilha de auditoria.
 
 ## Como funciona o fluxo
 
@@ -77,7 +79,7 @@ cd backend
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-python seed.py          # cria técnico de teste (tecnico1 / PIN 1234) e materiais de exemplo
+SEED_DEMO_DATA=true ADMIN_SENHA='senha-local-forte' python seed.py
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
@@ -94,27 +96,26 @@ para apontar pro endereço do seu VPS.
 
 ## Deploy no VPS (produção)
 
-**Backend:**
-- Use PostgreSQL em vez de SQLite: defina a variável de ambiente
-  `DATABASE_URL=postgresql://usuario:senha@localhost/estoque_campo`
-- A senha do primeiro usuário admin (login `admin`, papel gerência) é
-  definida por `ADMIN_SENHA` (padrão `admin123` — **troque isso antes de
-  rodar `seed.py` em produção**). Depois do primeiro login, use a aba
-  "Usuários do painel" (só gerência vê essa aba) pra criar outras contas
-  com login/senha próprios e o papel adequado (gerência ou almoxarifado).
-- Rode com um processo gerenciado (recomendo `systemd` + `gunicorn` com
-  workers uvicorn, do mesmo jeito que você já faz com o Hermes):
-  ```bash
-  pip install gunicorn
-  gunicorn main:app -w 2 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000
-  ```
-- Coloque atrás de um Nginx com HTTPS (Let's Encrypt) — o navegador só deixa
-  instalar PWA e usar `serviceWorker` em HTTPS (exceto `localhost`).
+Produção usa PostgreSQL, variáveis validadas, migrações Alembic, `systemd`,
+Nginx/HTTPS, health checks e backup diário. O backend rejeita SQLite,
+segredos fracos e curingas de origem/host quando `APP_ENV=production`.
 
-**Frontend:**
-- É só HTML/JS estático — sirva com Nginx direto, ou junto do backend.
-- Depois de publicado, no celular do técnico: abrir o link no Chrome →
-  menu → "Adicionar à tela inicial". Vira um app normal.
+Fluxo de banco, sempre com as variáveis do ambiente de destino carregadas:
+
+```bash
+cd backend
+alembic -c alembic.ini upgrade head
+python preflight.py
+python seed.py
+```
+
+O `seed.py` cria somente o administrador inicial em produção. Dados de
+demonstração exigem `SEED_DEMO_DATA=true` e são bloqueados nesse ambiente.
+Consulte [DEPLOY.md](DEPLOY.md) para o procedimento completo e o ensaio de
+restauração.
+
+O frontend deve apontar apenas para a URL HTTPS do backend. No Android de
+produção, não habilite tráfego HTTP em claro.
 
 ## Cadastro central do AVEN Monitor
 
@@ -126,17 +127,26 @@ Cliente > Unidade > Dispositivo > Links WAN
 
 O cadastro nasce inativo. Depois de configurar WireGuard e a community no
 servidor do agente, a Gerência solicita um teste de conectividade pelo Desk.
-O AVEN Monitor consulta `sysName.0` e `ifOperStatus` e devolve o resultado ao
-backend. Somente um teste bem-sucedido nos últimos 30 minutos libera a
-ativação.
+O AVEN Monitor consulta `sysName.0`, `ifOperStatus` e um probe ICMP ou TCP
+exclusivo de cada WAN. O roteamento `/32` desse alvo deve passar pelo peer
+WireGuard e sair pela WAN correspondente no MikroTik. Somente um teste
+completo bem-sucedido nos últimos 30 minutos libera a ativação.
 
-Dispositivos ativos são entregues ao agente por uma rota autenticada. A
-community, as chaves privadas do WireGuard e os tokens não são armazenados no
-cadastro nem enviados ao Desk.
+Cada instalação do agente possui código e token próprios, criados no Desk. O
+token é armazenado somente como hash no backend e o valor bruto é exibido uma
+única vez. Dispositivos ativos são entregues por `/api/v1`; o contrato antigo
+continua disponível durante a migração. A community e as chaves privadas do
+WireGuard não são armazenadas no cadastro nem enviadas ao Desk.
 
 As OS automáticas ficam vinculadas ao cliente, à unidade, ao dispositivo e ao
-link por códigos estáveis. O contrato anterior de incidentes continua aceito
-para permitir implantação gradual.
+link por códigos estáveis. Sintomas da mesma unidade dentro da janela de
+correlação viram uma única OS, com causa provável e eventos preservados. A
+Gerência também pode programar manutenção, acompanhar heartbeat, consultar a
+auditoria, restaurar uma versão anterior da configuração e rotacionar tokens.
+
+Valores financeiros usam `Numeric` e datas nativas do banco. Fotos, rotas e
+PDFs podem permanecer em `APP_DATA_DIR` ou usar armazenamento S3 compatível
+com `OBJECT_STORAGE_BACKEND=s3`, sem alterar as referências existentes.
 
 Testes do módulo:
 
@@ -162,7 +172,10 @@ backend/
   main.py         → API (FastAPI) — inclui rotas /admin/* pro painel
   models.py       → Tabelas do banco
   database.py     → Conexão (SQLite local / Postgres em produção)
-  seed.py         → Dados iniciais de teste
+  settings.py     → Validação central do ambiente e dos segredos
+  preflight.py    → Verificações antes da inicialização em produção
+  alembic/        → Migrações versionadas do banco
+  seed.py         → Administrador inicial; demo somente quando solicitado
 frontend/
   index.html      → Tela do técnico (versão web, base do app Android)
   app.js          → Lógica + fila offline + OS atribuídas pelo admin

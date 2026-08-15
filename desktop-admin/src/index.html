@@ -477,6 +477,59 @@
         <h3 style="margin-top:0;">Topologia cadastrada</h3>
         <div id="monitoramento-lista"></div>
       </div>
+
+      <div class="painel">
+        <h3 style="margin-top:0;">Agentes e saúde operacional</h3>
+        <div id="monitor-saude" style="margin-bottom:14px; color:#94a3b8;"></div>
+        <div class="grid2">
+          <div><label>Código do agente</label><input id="mon-agente-codigo" placeholder="ex: AGENTE-VPS-1"></div>
+          <div><label>Nome</label><input id="mon-agente-nome" placeholder="ex: VPS principal"></div>
+        </div>
+        <button type="button" onclick="criarAgenteMonitoramento()">Criar agente</button>
+        <p id="mon-agente-token" style="font-size:13px; color:#fbbf24;"></p>
+        <table>
+          <thead><tr><th>Agente</th><th>Status</th><th>Último contato</th><th>Configuração</th><th>Ações</th></tr></thead>
+          <tbody id="tabela-monitor-agentes"></tbody>
+        </table>
+      </div>
+
+      <div class="painel">
+        <h3 style="margin-top:0;">Manutenção programada</h3>
+        <p style="color:#94a3b8; font-size:13px;">Incidentes no escopo escolhido serão suspensos durante o período.</p>
+        <div class="grid2">
+          <div>
+            <label>Escopo</label>
+            <select id="mon-manutencao-escopo"></select>
+          </div>
+          <div><label>Motivo</label><input id="mon-manutencao-motivo" placeholder="ex: troca programada do roteador"></div>
+        </div>
+        <div class="grid2">
+          <div><label>Início</label><input id="mon-manutencao-inicio" type="datetime-local"></div>
+          <div><label>Fim</label><input id="mon-manutencao-fim" type="datetime-local"></div>
+        </div>
+        <button type="button" onclick="criarManutencaoMonitoramento()">Programar manutenção</button>
+        <table>
+          <thead><tr><th>Escopo</th><th>Período</th><th>Motivo</th><th>Ações</th></tr></thead>
+          <tbody id="tabela-monitor-manutencoes"></tbody>
+        </table>
+      </div>
+
+      <div class="grid2">
+        <div class="painel">
+          <h3 style="margin-top:0;">Versões de configuração</h3>
+          <table>
+            <thead><tr><th>Versão</th><th>Motivo</th><th></th></tr></thead>
+            <tbody id="tabela-monitor-versoes"></tbody>
+          </table>
+        </div>
+        <div class="painel">
+          <h3 style="margin-top:0;">Auditoria recente</h3>
+          <table>
+            <thead><tr><th>Quando</th><th>Ação</th><th>Ator</th></tr></thead>
+            <tbody id="tabela-monitor-auditoria"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
     <div id="painel-tecnicos" class="oculto">

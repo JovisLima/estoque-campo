@@ -1182,6 +1182,18 @@ function adicionarLinkMonitoramento(valores = {}) {
       <option value="PRIMARIO">Primário</option>
       <option value="BACKUP">Backup</option>
     </select>
+    <div class="grid2">
+      <div>
+        <label>Teste real da WAN</label>
+        <select class="mon-link-probe-tipo">
+          <option value="ICMP">ICMP (ping)</option>
+          <option value="TCP">TCP</option>
+        </select>
+      </div>
+      <div><label>IP de prova exclusivo</label><input class="mon-link-probe-host" placeholder="ex: 1.1.1.1"></div>
+    </div>
+    <label>Porta (somente TCP)</label>
+    <input class="mon-link-probe-porta" type="number" min="1" max="65535" placeholder="ex: 53">
     <button class="pequeno perigo" type="button">Remover link</button>
   `;
 
@@ -1190,6 +1202,9 @@ function adicionarLinkMonitoramento(valores = {}) {
   linha.querySelector(".mon-link-operadora").value = valores.operadora || "";
   linha.querySelector(".mon-link-ifindex").value = valores.if_index || "";
   linha.querySelector(".mon-link-papel").value = valores.papel || "PRIMARIO";
+  linha.querySelector(".mon-link-probe-tipo").value = valores.probe_tipo || "ICMP";
+  linha.querySelector(".mon-link-probe-host").value = valores.probe_host || "";
+  linha.querySelector(".mon-link-probe-porta").value = valores.probe_porta || "";
   linha.querySelector("button").addEventListener("click", () => linha.remove());
   container.appendChild(linha);
 }
@@ -1234,6 +1249,8 @@ async function carregarMonitoramento() {
     ).join("");
 
   renderizarTopologiaMonitoramento(topologia);
+  preencherEscoposManutencao(topologia);
+  await carregarOperacaoMonitoramento();
 }
 
 function renderizarTopologiaMonitoramento(topologia) {
@@ -1284,7 +1301,7 @@ function renderizarTopologiaMonitoramento(topologia) {
                 </div>
               </div>
               <table>
-                <thead><tr><th>Link</th><th>Operadora</th><th>Papel</th><th>ifIndex</th><th>Status</th></tr></thead>
+                <thead><tr><th>Link</th><th>Operadora</th><th>Papel</th><th>ifIndex</th><th>Probe WAN</th><th>Status</th></tr></thead>
                 <tbody>
                   ${dispositivo.links.map(link => `
                     <tr>
@@ -1292,6 +1309,7 @@ function renderizarTopologiaMonitoramento(topologia) {
                       <td>${escaparHtml(link.operadora)}</td>
                       <td>${escaparHtml(link.papel)}</td>
                       <td>${link.if_index}</td>
+                      <td>${escaparHtml(link.probe_tipo || "-")} ${escaparHtml(link.probe_host || "-")}${link.probe_porta ? `:${link.probe_porta}` : ""}</td>
                       <td>${link.ativo ? "ativo" : "inativo"}</td>
                     </tr>
                   `).join("")}
@@ -1305,6 +1323,165 @@ function renderizarTopologiaMonitoramento(topologia) {
   `).join("");
 }
 
+function formatarDataHora(valor) {
+  if (!valor) return "-";
+  const data = new Date(valor);
+  return Number.isNaN(data.getTime()) ? escaparHtml(valor) : data.toLocaleString("pt-BR");
+}
+
+function preencherEscoposManutencao(topologia) {
+  const select = document.getElementById("mon-manutencao-escopo");
+  const opcoes = [];
+  topologia.forEach(cliente => {
+    opcoes.push({ valor: `CLIENTE:${cliente.id}`, nome: `Cliente · ${cliente.cliente.nome}` });
+    cliente.unidades.forEach(unidade => {
+      opcoes.push({ valor: `UNIDADE:${unidade.id}`, nome: `Unidade · ${unidade.nome}` });
+      unidade.dispositivos.forEach(dispositivo => {
+        opcoes.push({ valor: `DISPOSITIVO:${dispositivo.id}`, nome: `Dispositivo · ${dispositivo.codigo}` });
+        dispositivo.links.forEach(link => {
+          opcoes.push({ valor: `LINK:${link.id}`, nome: `Link · ${dispositivo.codigo} / ${link.codigo}` });
+        });
+      });
+    });
+  });
+  select.innerHTML = opcoes.length
+    ? opcoes.map(item => `<option value="${item.valor}">${escaparHtml(item.nome)}</option>`).join("")
+    : `<option value="">Cadastre uma topologia primeiro</option>`;
+}
+
+async function carregarOperacaoMonitoramento() {
+  const respostas = await Promise.all([
+    fetch(`${API_URL}/admin/monitoramento/agentes`, { headers: headers() }),
+    fetch(`${API_URL}/admin/monitoramento/saude`, { headers: headers() }),
+    fetch(`${API_URL}/admin/monitoramento/manutencoes`, { headers: headers() }),
+    fetch(`${API_URL}/admin/monitoramento/configuracoes`, { headers: headers() }),
+    fetch(`${API_URL}/admin/auditoria?limite=20`, { headers: headers() }),
+  ]);
+  if (respostas.some(resposta => !resposta.ok)) return;
+  const [agentes, saude, manutencoes, versoes, auditoria] = await Promise.all(
+    respostas.map(resposta => resposta.json())
+  );
+
+  document.getElementById("monitor-saude").innerHTML =
+    `<strong>${saude.resumo.online}/${saude.resumo.ativos}</strong> agentes ativos online · ` +
+    `${saude.resumo.total} cadastrados`;
+  document.getElementById("tabela-monitor-agentes").innerHTML = agentes.length
+    ? agentes.map(agente => `
+      <tr>
+        <td>${escaparHtml(agente.nome)}<br><span style="color:#64748b;font-size:11px;">${escaparHtml(agente.codigo)}</span></td>
+        <td class="${agente.online ? "status-disponivel" : "status-baixada"}">${agente.online ? "online" : "offline"}${agente.ativo ? "" : " · desativado"}</td>
+        <td>${formatarDataHora(agente.ultimo_contato_em)}</td>
+        <td>${escaparHtml((agente.ultima_versao_config || "-").slice(0, 12))}</td>
+        <td>
+          <button class="pequeno secundario" onclick="rotacionarTokenAgente(${agente.id})">Rotacionar token</button>
+          <button class="pequeno ${agente.ativo ? "perigo" : ""}" onclick="alterarAgenteAtivo(${agente.id}, ${!agente.ativo})">${agente.ativo ? "Desativar" : "Ativar"}</button>
+        </td>
+      </tr>`).join("")
+    : `<tr><td colspan="5" style="color:#64748b;">Nenhum agente cadastrado.</td></tr>`;
+
+  document.getElementById("tabela-monitor-manutencoes").innerHTML = manutencoes.length
+    ? manutencoes.map(janela => {
+      const escopo = janela.link_codigo || janela.dispositivo_codigo || janela.unidade_codigo || janela.cliente_codigo;
+      return `<tr>
+        <td>${escaparHtml(escopo || "-")}</td>
+        <td>${formatarDataHora(janela.inicio)}<br>até ${formatarDataHora(janela.fim)}</td>
+        <td>${escaparHtml(janela.motivo)}</td>
+        <td><button class="pequeno perigo" onclick="cancelarManutencaoMonitoramento(${janela.id})">Cancelar</button></td>
+      </tr>`;
+    }).join("")
+    : `<tr><td colspan="4" style="color:#64748b;">Nenhuma manutenção programada.</td></tr>`;
+
+  document.getElementById("tabela-monitor-versoes").innerHTML = versoes.length
+    ? versoes.map(versao => `<tr>
+      <td><span class="${versao.ativa ? "status-disponivel" : ""}">${escaparHtml(versao.versao.slice(0, 12))}</span></td>
+      <td>${escaparHtml(versao.motivo)}</td>
+      <td>${versao.ativa ? "ativa" : `<button class="pequeno secundario" onclick="rollbackConfiguracaoMonitoramento(${versao.id})">Restaurar</button>`}</td>
+    </tr>`).join("")
+    : `<tr><td colspan="3" style="color:#64748b;">Nenhuma versão publicada.</td></tr>`;
+
+  document.getElementById("tabela-monitor-auditoria").innerHTML = auditoria.length
+    ? auditoria.map(evento => `<tr>
+      <td>${formatarDataHora(evento.criado_em)}</td>
+      <td>${escaparHtml(evento.acao)}<br><span style="color:#64748b;font-size:11px;">${escaparHtml(evento.entidade_tipo)}</span></td>
+      <td>${escaparHtml(evento.ator_codigo || evento.ator_tipo)}</td>
+    </tr>`).join("")
+    : `<tr><td colspan="3" style="color:#64748b;">Sem eventos recentes.</td></tr>`;
+}
+
+function exibirTokenAgente(codigo, token) {
+  document.getElementById("mon-agente-token").textContent =
+    `${codigo}: ${token} — copie agora; o token não será exibido novamente.`;
+}
+
+async function criarAgenteMonitoramento() {
+  const codigo = document.getElementById("mon-agente-codigo").value.trim();
+  const nome = document.getElementById("mon-agente-nome").value.trim();
+  const resposta = await fetch(`${API_URL}/admin/monitoramento/agentes`, {
+    method: "POST", headers: headers(), body: JSON.stringify({ codigo, nome }),
+  });
+  const resultado = await resposta.json().catch(() => ({}));
+  if (!resposta.ok) { alert(resultado.detail || "Não foi possível criar o agente."); return; }
+  exibirTokenAgente(resultado.codigo, resultado.token);
+  document.getElementById("mon-agente-codigo").value = "";
+  document.getElementById("mon-agente-nome").value = "";
+  await carregarOperacaoMonitoramento();
+}
+
+async function rotacionarTokenAgente(id) {
+  if (!confirm("O token atual deixará de funcionar. Continuar?")) return;
+  const resposta = await fetch(`${API_URL}/admin/monitoramento/agentes/${id}/rotacionar-token`, {
+    method: "POST", headers: headers(),
+  });
+  const resultado = await resposta.json().catch(() => ({}));
+  if (!resposta.ok) { alert(resultado.detail || "Falha ao rotacionar token."); return; }
+  exibirTokenAgente(resultado.codigo, resultado.token);
+  await carregarOperacaoMonitoramento();
+}
+
+async function alterarAgenteAtivo(id, ativo) {
+  await fetch(`${API_URL}/admin/monitoramento/agentes/${id}/ativo`, {
+    method: "PATCH", headers: headers(), body: JSON.stringify({ ativo }),
+  });
+  await carregarOperacaoMonitoramento();
+}
+
+async function criarManutencaoMonitoramento() {
+  const [escopo_tipo, id] = document.getElementById("mon-manutencao-escopo").value.split(":");
+  const inicio = document.getElementById("mon-manutencao-inicio").value;
+  const fim = document.getElementById("mon-manutencao-fim").value;
+  const motivo = document.getElementById("mon-manutencao-motivo").value.trim();
+  if (!escopo_tipo || !id || !inicio || !fim || !motivo) {
+    alert("Preencha escopo, período e motivo."); return;
+  }
+  const resposta = await fetch(`${API_URL}/admin/monitoramento/manutencoes`, {
+    method: "POST", headers: headers(), body: JSON.stringify({
+      escopo_tipo, escopo_id: Number(id),
+      inicio: new Date(inicio).toISOString(),
+      fim: new Date(fim).toISOString(), motivo,
+    }),
+  });
+  const resultado = await resposta.json().catch(() => ({}));
+  if (!resposta.ok) { alert(resultado.detail || "Falha ao programar manutenção."); return; }
+  await carregarMonitoramento();
+}
+
+async function cancelarManutencaoMonitoramento(id) {
+  if (!confirm("Cancelar esta janela de manutenção?")) return;
+  await fetch(`${API_URL}/admin/monitoramento/manutencoes/${id}/cancelar`, {
+    method: "POST", headers: headers(),
+  });
+  await carregarMonitoramento();
+}
+
+async function rollbackConfiguracaoMonitoramento(id) {
+  if (!confirm("Restaurar esta configuração para os agentes? O cadastro no banco não será apagado.")) return;
+  const resposta = await fetch(`${API_URL}/admin/monitoramento/configuracoes/${id}/rollback`, {
+    method: "POST", headers: headers(),
+  });
+  if (!resposta.ok) { alert("Não foi possível restaurar a configuração."); return; }
+  await carregarOperacaoMonitoramento();
+}
+
 async function cadastrarTopologiaMonitoramento() {
   const msg = document.getElementById("mon-msg");
   const links = [...document.querySelectorAll(".monitor-link-row")].map(linha => ({
@@ -1313,6 +1490,11 @@ async function cadastrarTopologiaMonitoramento() {
     operadora: linha.querySelector(".mon-link-operadora").value.trim(),
     if_index: Number(linha.querySelector(".mon-link-ifindex").value),
     papel: linha.querySelector(".mon-link-papel").value,
+    probe_tipo: linha.querySelector(".mon-link-probe-tipo").value,
+    probe_host: linha.querySelector(".mon-link-probe-host").value.trim(),
+    probe_porta: linha.querySelector(".mon-link-probe-tipo").value === "TCP"
+      ? Number(linha.querySelector(".mon-link-probe-porta").value)
+      : null,
     ativo: true,
   }));
 
@@ -1335,7 +1517,10 @@ async function cadastrarTopologiaMonitoramento() {
     !dados.cliente_id || !dados.cliente_codigo || !dados.unidade_codigo ||
     !dados.unidade_nome || !dados.cidade || !dados.dispositivo_codigo ||
     !dados.dispositivo_nome || !dados.fabricante || !dados.ip_wireguard ||
-    !links.length || links.some(link => !link.codigo || !link.nome || !link.operadora || !link.if_index)
+    !links.length || links.some(link =>
+      !link.codigo || !link.nome || !link.operadora || !link.if_index ||
+      !link.probe_host || (link.probe_tipo === "TCP" && !link.probe_porta)
+    )
   ) {
     msg.style.color = "#f87171";
     msg.textContent = "Preencha o cliente, unidade, dispositivo e todos os campos dos links.";

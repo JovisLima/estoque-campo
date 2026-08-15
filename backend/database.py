@@ -1,21 +1,18 @@
-import os
-from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.pool import StaticPool
 
-# Por padrão usa SQLite (arquivo local, zero configuração).
-# Para produção no VPS, defina a variável de ambiente DATABASE_URL, ex:
-#   postgresql://usuario:senha@localhost/estoque_campo
-BASE_DIR = Path(__file__).resolve().parent
-SQLITE_PATH = BASE_DIR / "estoque_campo.db"
+from settings import settings
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    f"sqlite:///{SQLITE_PATH.as_posix()}",
-)
+engine_options = {"pool_pre_ping": True}
+if settings.database_url.startswith("sqlite"):
+    engine_options["connect_args"] = {"check_same_thread": False}
+if settings.database_url == "sqlite://":
+    # Um unico banco em memoria precisa ser compartilhado entre a thread do
+    # TestClient e a thread principal da suite.
+    engine_options["poolclass"] = StaticPool
 
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
+engine = create_engine(settings.database_url, **engine_options)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

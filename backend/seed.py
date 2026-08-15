@@ -1,74 +1,79 @@
-"""
-Cria dados iniciais: um técnico de teste e alguns materiais comuns de ISP.
-Rode uma vez com: python seed.py
-"""
-import bcrypt
-from database import Base, engine, SessionLocal
-import models
+"""Cria somente o administrador inicial; dados de demonstracao sao opt-in."""
 
-Base.metadata.create_all(bind=engine)
-db = SessionLocal()
-
-"""
-Cria dados iniciais: um técnico de teste, um admin de gerência,
-e alguns materiais comuns de ISP.
-Rode uma vez com: python seed.py
-"""
 import os
+
 import bcrypt
-from database import Base, engine, SessionLocal
+
 import models
+from database import SessionLocal
+from settings import settings, validar_senha_bootstrap
 
-Base.metadata.create_all(bind=engine)
-db = SessionLocal()
 
-ADMIN_SENHA_INICIAL = os.getenv("ADMIN_SENHA", "admin123")
+def habilitado(nome: str) -> bool:
+    return os.getenv(nome, "false").strip().lower() in {"1", "true", "sim", "yes"}
 
-if not db.query(models.AdminUsuario).first():
-    admin = models.AdminUsuario(
+
+def criar_admin(db) -> bool:
+    if db.query(models.AdminUsuario).first():
+        return False
+
+    senha = validar_senha_bootstrap(os.getenv("ADMIN_SENHA", ""))
+    db.add(models.AdminUsuario(
         nome="Administrador",
-        login="admin",
-        senha_hash=bcrypt.hashpw(ADMIN_SENHA_INICIAL.encode(), bcrypt.gensalt()).decode(),
+        login=os.getenv("ADMIN_LOGIN", "admin").strip(),
+        senha_hash=bcrypt.hashpw(senha.encode(), bcrypt.gensalt()).decode(),
         papel=models.PapelAdmin.gerencia,
-    )
-    db.add(admin)
+        ativo=True,
+    ))
+    return True
 
-if not db.query(models.Tecnico).first():
-    tecnico = models.Tecnico(
-        nome="Técnico Teste",
-        login="tecnico1",
-        pin_hash=bcrypt.hashpw(b"1234", bcrypt.gensalt()).decode(),  # troque o PIN em produção
-        aprovado=True,  # técnico de teste já aprovado, pra facilitar
-        is_adm=True,  # técnico de teste como ADM, pra poder testar OS avulsa
-    )
-    db.add(tecnico)
 
-materiais_exemplo = [
-    ("Cabo drop 1FO", "cabo", "m", 500, 100),
-    ("Conector SC/APC pré-conectorizado", "conector", "un", 100, 20),
-    ("ONU GPON", "equipamento", "un", 30, 5),
-    ("Cordão óptico 1m", "cabo", "un", 50, 10),
-    ("Roseta óptica", "acessorio", "un", 80, 15),
-    ("Abraçadeira de nylon", "fixacao", "un", 500, 100),
-]
-for nome, cat, unidade, qtd, minimo in materiais_exemplo:
-    if not db.query(models.Material).filter_by(nome=nome).first():
-        db.add(models.Material(
-            nome=nome, categoria=cat, unidade=unidade,
-            qtd_atual=qtd, qtd_minima=minimo,
+def criar_dados_demonstracao(db) -> None:
+    if settings.producao:
+        raise RuntimeError("SEED_DEMO_DATA nao e permitido em producao")
+
+    if not db.query(models.Tecnico).first():
+        db.add(models.Tecnico(
+            nome="Tecnico Teste",
+            login="tecnico1",
+            pin_hash=bcrypt.hashpw(b"1234", bcrypt.gensalt()).decode(),
+            aprovado=True,
+            is_adm=True,
         ))
 
-ferramentas_exemplo = [
-    ("Fusora de fibra", "FUS-001", "ferramenta"),
-    ("Power meter", "PWM-001", "ferramenta"),
-    ("Cinto de segurança tipo paraquedista", "EPI-001", "epi"),
-    ("Luva isolante", "EPI-002", "epi"),
-]
-for nome, codigo, categoria in ferramentas_exemplo:
-    if not db.query(models.Ferramenta).filter_by(codigo_patrimonio=codigo).first():
-        db.add(models.Ferramenta(nome=nome, codigo_patrimonio=codigo, categoria=categoria))
+    materiais = [
+        ("Cabo drop 1FO", "cabo", "m", 500, 100),
+        ("Conector SC/APC pre-conectorizado", "conector", "un", 100, 20),
+        ("ONU GPON", "equipamento", "un", 30, 5),
+    ]
+    for nome, categoria, unidade, quantidade, minimo in materiais:
+        if not db.query(models.Material).filter_by(nome=nome).first():
+            db.add(models.Material(
+                nome=nome,
+                categoria=categoria,
+                unidade=unidade,
+                qtd_atual=quantidade,
+                qtd_minima=minimo,
+            ))
 
-db.commit()
-print("Dados iniciais criados.")
-print("Login ADMIN DESKTOP -> usuário: admin / senha:", ADMIN_SENHA_INICIAL, "(papel: gerência)")
-print("Login TÉCNICO (app) -> usuário: tecnico1 / PIN: 1234")
+
+def executar() -> None:
+    db = SessionLocal()
+    try:
+        admin_criado = criar_admin(db)
+        if habilitado("SEED_DEMO_DATA"):
+            criar_dados_demonstracao(db)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+    print("Bootstrap concluido.")
+    print("Administrador inicial criado." if admin_criado else "Administrador ja existente.")
+    print("A senha nao e exibida nos logs.")
+
+
+if __name__ == "__main__":
+    executar()

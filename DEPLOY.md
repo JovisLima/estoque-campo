@@ -1,200 +1,251 @@
-# Deploy em Produção — Aven Connect / Estoque de Campo
+# Deploy seguro — Estoque de Campo
 
-Este guia assume um VPS com **Ubuntu 22.04 ou 24.04** (ajuste os comandos
-se for outra distro) e que você já tem um **domínio ou subdomínio**
-apontando pro IP do VPS (ex: `estoque.suaempresa.com.br` → registro DNS
-tipo A pro IP do servidor). Sem domínio, não dá pra gerar HTTPS de verdade
-com Let's Encrypt — é pré-requisito.
+Este procedimento considera uma VPS KVM com Ubuntu 24.04 LTS, IPv4 dedicado,
+DNS apontando para a VPS e o código instalado em `/opt/estoque-campo`.
 
----
+O primeiro deploy deve ser feito em etapas. Não publique a porta 8000, não
+copie ambientes virtuais e não use SQLite em produção.
 
-## 1. Preparar o VPS
+## 1. Inspecionar e preparar a VPS
 
-Conecte via SSH e atualize o sistema:
+Antes de instalar a aplicação, confirme região, IP, sistema e recursos:
+
 ```bash
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y python3-venv python3-pip postgresql postgresql-contrib nginx git
+hostnamectl
+cat /etc/os-release
+ip -brief address
+df -h
+free -h
 ```
 
-## 2. Criar o banco de dados PostgreSQL
+Atualize o sistema e instale os pacotes necessários:
+
+```bash
+sudo apt update
+sudo apt full-upgrade -y
+sudo apt install -y git nginx postgresql postgresql-client python3-venv \
+  certbot python3-certbot-nginx ufw awscli
+```
+
+Crie o usuário de serviço caso ele ainda não exista:
+
+```bash
+sudo adduser lima
+sudo usermod -aG sudo lima
+```
+
+Mantenha a sessão SSH atual aberta enquanto configura o firewall.
+
+## 2. Instalar o código e o ambiente Python
+
+```bash
+sudo install -d -o lima -g lima /opt/estoque-campo
+sudo -u lima git clone https://github.com/JovisLima/estoque-campo.git /opt/estoque-campo
+sudo -u lima python3 -m venv /opt/estoque-campo/backend/venv
+sudo -u lima /opt/estoque-campo/backend/venv/bin/pip install --upgrade pip
+sudo -u lima /opt/estoque-campo/backend/venv/bin/pip install \
+  -r /opt/estoque-campo/backend/requirements.txt
+```
+
+Fixe a versão/commit implantado e registre-o no controle operacional. Não faça
+`git pull` automático no `systemd`.
+
+## 3. Criar o PostgreSQL
+
+Gere uma senha longa, guarde-a no gerenciador de segredos e não a cole em
+logs ou tickets:
+
+```bash
+openssl rand -hex 32
+```
+
+Entre no PostgreSQL:
 
 ```bash
 sudo -u postgres psql
 ```
-Dentro do `psql`:
+
+Execute, substituindo a senha:
+
 ```sql
-CREATE DATABASE estoque_campo;
 CREATE USER estoque_user WITH PASSWORD 'SENHA_FORTE_AQUI';
-GRANT ALL PRIVILEGES ON DATABASE estoque_campo TO estoque_user;
-\q
+CREATE DATABASE estoque_campo OWNER estoque_user;
+\connect estoque_campo
+GRANT ALL ON SCHEMA public TO estoque_user;
+\quit
 ```
 
-## 3. Enviar o código pro VPS
+O PostgreSQL deve continuar acessível apenas localmente, salvo se houver uma
+necessidade e uma rede privada explicitamente projetadas para isso.
 
-Envie a pasta `backend/` do projeto pro servidor (via `scp`, `git clone` do
-seu próprio repositório, ou até um client SFTP como FileZilla). Recomendo
-colocar em `/opt/estoque-campo/backend`:
+## 4. Configurar o ambiente de produção
+
+Crie um diretório central para configurações:
+
 ```bash
-sudo mkdir -p /opt/estoque-campo
-sudo chown $USER:$USER /opt/estoque-campo
-# depois de copiar os arquivos pra lá:
-cd /opt/estoque-campo/backend
+sudo install -d -m 0750 -o root -g lima /etc/aven
+sudo install -m 0640 -o root -g lima \
+  /opt/estoque-campo/deploy/.env.example /etc/aven/estoque-campo.env
+sudo nano /etc/aven/estoque-campo.env
 ```
 
-## 4. Ambiente virtual e dependências
+Preencha no mínimo:
+
+- `DATABASE_URL` com a senha do banco;
+- `JWT_SECRET_KEY` gerada por `openssl rand -hex 32`;
+- `AVEN_ALLOW_LEGACY_MONITOR_TOKEN=false`; o agente e o token individual são
+  criados depois no Desk;
+- `CORS_ALLOWED_ORIGINS` com as origens HTTPS realmente utilizadas;
+- `ALLOWED_HOSTS` com o domínio público;
+- `ADMIN_SENHA` com uma senha inicial forte e exclusiva.
+
+Produção rejeita SQLite, curingas de CORS/hosts, segredos fracos e senhas de
+bootstrap conhecidas. A documentação `/docs` permanece desativada por padrão.
+
+Se os anexos forem armazenados fora da VPS, configure
+`OBJECT_STORAGE_BACKEND=s3`, `S3_BUCKET`, `S3_PREFIX`, região/endpoint e uma
+credencial limitada ao prefixo. Mantenha `local` no primeiro deploy se esse
+armazenamento ainda não estiver contratado.
+
+## 5. Migrar o banco e criar o primeiro administrador
+
+O schema é controlado pelo Alembic; a aplicação não cria tabelas
+automaticamente em produção:
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+sudo systemd-run --wait --pipe --collect \
+  -p User=lima -p Group=lima \
+  -p WorkingDirectory=/opt/estoque-campo/backend \
+  -p EnvironmentFile=/etc/aven/estoque-campo.env \
+  /opt/estoque-campo/backend/venv/bin/alembic \
+  -c /opt/estoque-campo/backend/alembic.ini upgrade head
+
+sudo systemd-run --wait --pipe --collect \
+  -p User=lima -p Group=lima \
+  -p WorkingDirectory=/opt/estoque-campo/backend \
+  -p EnvironmentFile=/etc/aven/estoque-campo.env \
+  /opt/estoque-campo/backend/venv/bin/python \
+  /opt/estoque-campo/backend/seed.py
 ```
-No Linux o `psycopg2-binary` instala sem o problema que deu no Windows.
 
-## 5. Configurar as variáveis de ambiente
+O `seed.py` de produção cria somente o primeiro administrador. Ele não cria o
+técnico de demonstração com PIN conhecido. Depois de confirmar o login,
+remova `ADMIN_SENHA` do arquivo de ambiente; ela não é necessária para o
+funcionamento normal.
 
-```bash
-cp ../deploy/.env.example .env
-nano .env
-```
-Preencha a senha real do Postgres (a mesma do passo 2) e escolha uma senha
-forte pro `ADMIN_SENHA` — essa é a senha do PRIMEIRO usuário admin (login
-`admin`, papel gerência), criado pelo `seed.py`. Depois do primeiro login,
-crie os outros usuários (gerência/almoxarifado) pela própria aba "Usuários
-do painel" — não precisa mexer mais em variável de ambiente pra isso.
+Antes de adotar Alembic em um banco antigo criado por `create_all`, faça backup
+e compare o schema. Não execute `alembic stamp` às cegas.
 
-## 6. Criar as tabelas e testar manualmente uma vez
+## 6. Instalar e iniciar o serviço
 
 ```bash
-python seed.py
-```
-Isso cria o técnico de teste (`tecnico1`/`1234`) — depois de validar que
-tudo funciona, **apague ou desative esse técnico de teste** pelo painel
-admin (ou direto no banco), já que a senha dele é pública/conhecida.
-
-Teste rápido antes de virar serviço:
-```bash
-source .env  # carrega as variáveis nesse terminal
-uvicorn main:app --host 127.0.0.1 --port 8000
-```
-Se subir sem erro, `Ctrl+C` e siga pro próximo passo.
-
-## 7. Rodar como serviço permanente (systemd)
-
-```bash
-sudo cp ../deploy/estoque-campo.service /etc/systemd/system/
-```
-Edite `/etc/systemd/system/estoque-campo.service` se o caminho do projeto
-não for exatamente `/opt/estoque-campo/backend`. Depois:
-```bash
+sudo cp /opt/estoque-campo/deploy/estoque-campo.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable estoque-campo
-sudo systemctl start estoque-campo
-sudo systemctl status estoque-campo
-```
-Deve aparecer "active (running)" em verde. A partir de agora, o backend
-sobe sozinho até quando o VPS reiniciar.
-
-Ver os logs se algo der errado:
-```bash
-sudo journalctl -u estoque-campo -f
+sudo systemctl enable --now estoque-campo.service
+sudo systemctl status estoque-campo.service
+sudo journalctl -u estoque-campo.service -n 100 --no-pager
 ```
 
-## 8. Nginx + HTTPS (Let's Encrypt)
+Antes de cada inicialização, o serviço aplica as migrações e executa o
+`preflight.py`, que verifica banco, revisão Alembic e diretório persistente.
+
+Teste localmente:
 
 ```bash
-sudo cp ../deploy/nginx-estoque-campo.conf /etc/nginx/sites-available/estoque-campo
+curl --fail -H 'Host: estoque.suaempresa.com.br' \
+  http://127.0.0.1:8000/health/live
+curl --fail -H 'Host: estoque.suaempresa.com.br' \
+  http://127.0.0.1:8000/health/ready
+```
+
+## 7. Nginx, DNS e HTTPS
+
+Edite o domínio no arquivo fornecido e instale-o:
+
+```bash
+sudo cp /opt/estoque-campo/deploy/nginx-estoque-campo.conf \
+  /etc/nginx/sites-available/estoque-campo
 sudo nano /etc/nginx/sites-available/estoque-campo
-```
-Troque `estoque.suaempresa.com.br` pelo seu domínio real. Depois:
-```bash
-sudo ln -s /etc/nginx/sites-available/estoque-campo /etc/nginx/sites-enabled/
-sudo nginx -t   # testa se a configuração está válida
+sudo ln -s /etc/nginx/sites-available/estoque-campo \
+  /etc/nginx/sites-enabled/estoque-campo
+sudo nginx -t
 sudo systemctl reload nginx
-```
-
-Agora gere o certificado HTTPS automaticamente:
-```bash
-sudo apt install -y certbot python3-certbot-nginx
 sudo certbot --nginx -d estoque.suaempresa.com.br
+sudo certbot renew --dry-run
 ```
-Siga as perguntas (email, aceitar termos). O certbot já ajusta o Nginx
-sozinho pra usar HTTPS e redirecionar HTTP → HTTPS. Ele também configura
-renovação automática do certificado.
 
-Teste no navegador: `https://estoque.suaempresa.com.br/docs` deve abrir a
-documentação da API com o cadeado verde.
+O Nginx limita tentativas de login, adiciona cabeçalhos de segurança e faz o
+proxy apenas para `127.0.0.1:8000`.
 
-## 9. Firewall
+## 8. Firewall e snapshot
+
+Primeiro confirme que a regra SSH corresponde à porta realmente utilizada:
 
 ```bash
-sudo ufw allow 22    # SSH — não esqueça, senão você se tranca pra fora
-sudo ufw allow 80
-sudo ufw allow 443
+sudo ufw allow OpenSSH
+sudo ufw allow 'Nginx Full'
 sudo ufw enable
+sudo ufw status verbose
 ```
-A porta 8000 **não precisa** ficar aberta pro mundo — só o Nginx (local)
-fala com ela.
 
-## 10. Backup
+Não libere as portas 8000 ou 5432 para a Internet. Após validar SSH, HTTPS e
+serviços, crie um snapshot da VPS no provedor.
 
-Configure um backup periódico (cron) pelo menos do banco de dados e das
-pastas de fotos/PDFs — se o VPS tiver algum problema, é isso que evita
-perder o histórico de tudo:
+## 9. Backup e teste de restauração
+
+Instale e ative o timer diário:
+
 ```bash
-sudo -u postgres pg_dump estoque_campo > backup_$(date +%Y%m%d).sql
-```
-As pastas `backend/relatorios/`, `backend/fotos_perfil/` e
-`backend/fotos_os/` guardam os arquivos gerados — inclua elas num backup
-regular também (rsync pra outro servidor, ou um serviço de backup em nuvem).
-
----
-
-## 11. Apontar os apps pro servidor de produção
-
-Agora que o backend está em HTTPS de verdade, **os workarounds que usamos
-pra testar no emulador não são mais necessários** — dá pra usar a
-configuração mais segura e simples.
-
-**App do técnico** (`android-tecnico/www/app.js`):
-```js
-const API_URL = "https://estoque.suaempresa.com.br";
+sudo install -d -m 0700 -o lima -g lima /var/backups/estoque-campo
+sudo cp /opt/estoque-campo/deploy/estoque-campo-backup.service \
+  /opt/estoque-campo/deploy/estoque-campo-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now estoque-campo-backup.timer
+sudo systemctl start estoque-campo-backup.service
+sudo systemctl status estoque-campo-backup.service
+sudo systemctl list-timers estoque-campo-backup.timer
 ```
 
-**Reverta o `capacitor.config.json`** pra versão sem os workarounds de HTTP:
-```json
-{
-  "appId": "com.estoquecampo.tecnico",
-  "appName": "Aven Connect",
-  "webDir": "www"
-}
-```
-(remove o bloco `"server": { "androidScheme": "http", "cleartext": true }`
-inteiro — não precisa mais, já que agora é tudo HTTPS)
+O backup inclui um `pg_dump` em formato custom, arquivos persistentes e
+checksums SHA-256. Para cópia externa automática:
 
-Depois:
-```powershell
-npx cap sync android
-```
-E gere o APK final de novo (Build → Build Bundle(s)/APK(s) → Build APK(s)).
-
-**App desktop** (`desktop-admin/src/app.js`):
-```js
-const API_URL = "https://estoque.suaempresa.com.br";
-```
-Depois gere o instalador final:
-```powershell
-cd desktop-admin
-npm run build-win
+```bash
+sudo install -m 0600 -o root -g root \
+  /opt/estoque-campo/deploy/backup.env.example \
+  /etc/aven/estoque-campo-backup.env
+sudo nano /etc/aven/estoque-campo-backup.env
+sudo systemctl start estoque-campo-backup.service
 ```
 
-## Checklist final antes de distribuir pros técnicos
+Quando `BACKUP_S3_URI` está definido, o serviço envia o diretório e baixa o
+`SHA256SUMS` novamente para conferir a cópia. Aplique retenção/versionamento no
+bucket e use uma credencial limitada a esse prefixo.
 
-- [ ] `ADMIN_SENHA` (senha do primeiro usuário `admin`) trocada pra algo forte (não `admin123`)
-- [ ] Técnico de teste (`tecnico1`) apagado ou com PIN trocado
-- [ ] HTTPS funcionando (cadeado verde no navegador)
-- [ ] Backend rodando como serviço (`systemctl status estoque-campo` = active)
-- [ ] Firewall configurado (só 22/80/443 abertas)
-- [ ] Backup do banco configurado
-- [ ] `API_URL` nos dois apps apontando pro domínio real, não IP local
-- [ ] APK final gerado e testado num celular de verdade (não só emulador)
-- [ ] Instalador do desktop gerado e testado
+Um backup só é confiável depois de um ensaio de restauração em banco separado:
+
+```bash
+createdb -h 127.0.0.1 -U estoque_user estoque_restore_test
+pg_restore -h 127.0.0.1 -U estoque_user -d estoque_restore_test \
+  --clean --if-exists CAMINHO_DO_BACKUP.dump
+```
+
+Use credenciais e permissões adequadas ao ambiente do ensaio e apague o banco
+de teste somente após validar tabelas e registros.
+
+## 10. Publicar os clientes
+
+Depois que o domínio HTTPS estiver estável, configure `API_URL` no Android e
+no Desk com `https://estoque.suaempresa.com.br`, sincronize o Capacitor e gere
+novos artefatos release. Não use `cleartext` no Android de produção.
+
+## Checklist de liberação
+
+- [ ] Ubuntu 24.04, IPv4 e região confirmados.
+- [ ] SSH por chave, firewall e snapshot validados.
+- [ ] PostgreSQL local, migrations em `head` e preflight aprovados.
+- [ ] Segredos únicos e nenhum valor de exemplo no ambiente.
+- [ ] Administrador inicial criado e `ADMIN_SENHA` removida do ambiente.
+- [ ] HTTPS válido; portas 8000 e 5432 fechadas externamente.
+- [ ] `/health/live` e `/health/ready` respondendo.
+- [ ] Backup externo e restauração de teste concluídos.
+- [ ] Monitor implantado somente depois de o backend estar saudável.
