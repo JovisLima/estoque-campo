@@ -173,6 +173,7 @@
       <div class="grupo-titulo grupo-gerencia oculto">Serviços</div>
       <div class="aba oculto grupo-gerencia" data-aba="ordens" onclick="mudarAba('ordens')"><span class="icone">🧾</span> Ordens de Serviço</div>
       <div class="aba oculto grupo-gerencia" data-aba="clientes" onclick="mudarAba('clientes')"><span class="icone">📍</span> Clientes</div>
+      <div class="aba oculto grupo-gerencia" data-aba="monitoramento" onclick="mudarAba('monitoramento')"><span class="icone">📡</span> Monitoramento</div>
       <div class="aba oculto grupo-gerencia" data-aba="tecnicos" onclick="mudarAba('tecnicos')">
         <span class="icone">👷</span> Técnicos <span id="badge-pendentes" class="contador oculto">0</span>
       </div>
@@ -396,6 +397,86 @@
       <input type="file" id="input-rota-cabo" accept="image/*" class="oculto" onchange="rotaCaboSelecionada(event)">
 
       <div id="detalhe-cliente" class="painel oculto"></div>
+    </div>
+
+    <!-- ABA MONITORAMENTO -->
+    <div id="painel-monitoramento" class="oculto">
+      <h2>Monitoramento de clientes</h2>
+
+      <div class="painel">
+        <h3 style="margin-top:0;">Cadastrar unidade e MikroTik</h3>
+        <p style="color:#94a3b8; font-size:13px;">
+          O cadastro nasce inativo. Configure WireGuard e a community na VPS,
+          valide o acesso e somente depois ative o dispositivo.
+        </p>
+
+        <div class="grid2">
+          <div>
+            <label>Cliente cadastrado</label>
+            <select id="mon-cliente"></select>
+          </div>
+          <div>
+            <label>Código estável do cliente</label>
+            <input id="mon-cliente-codigo" placeholder="ex: GRUPO-SANTA-CRUZ">
+          </div>
+        </div>
+
+        <div class="grid2">
+          <div>
+            <label>Código da unidade</label>
+            <input id="mon-unidade-codigo" placeholder="ex: USINA-SANTA-CRUZ">
+          </div>
+          <div>
+            <label>Nome da unidade</label>
+            <input id="mon-unidade-nome" placeholder="ex: Usina Santa Cruz">
+          </div>
+        </div>
+
+        <div class="grid2">
+          <div>
+            <label>Cidade</label>
+            <input id="mon-cidade" placeholder="ex: Américo Brasiliense">
+          </div>
+          <div>
+            <label>UF</label>
+            <input id="mon-estado" maxlength="2" placeholder="SP">
+          </div>
+        </div>
+
+        <div class="grid2">
+          <div>
+            <label>Código do dispositivo</label>
+            <input id="mon-dispositivo-codigo" placeholder="ex: RB-SANTA-CRUZ-01">
+          </div>
+          <div>
+            <label>Nome do dispositivo</label>
+            <input id="mon-dispositivo-nome" placeholder="ex: MikroTik principal">
+          </div>
+        </div>
+
+        <div class="grid2">
+          <div>
+            <label>Fabricante</label>
+            <input id="mon-fabricante" value="MikroTik">
+          </div>
+          <div>
+            <label>IP privado WireGuard</label>
+            <input id="mon-ip-wireguard" placeholder="ex: 10.90.0.10">
+          </div>
+        </div>
+
+        <h3 style="margin-bottom:4px; margin-top:22px;">Links WAN</h3>
+        <div id="mon-links-form"></div>
+        <button class="secundario" type="button" onclick="adicionarLinkMonitoramento()">+ Adicionar link</button>
+
+        <button type="button" onclick="cadastrarTopologiaMonitoramento()">Salvar cadastro inativo</button>
+        <p id="mon-msg" style="font-size:13px;"></p>
+      </div>
+
+      <div class="painel">
+        <h3 style="margin-top:0;">Topologia cadastrada</h3>
+        <div id="monitoramento-lista"></div>
+      </div>
     </div>
 
     <div id="painel-tecnicos" class="oculto">
