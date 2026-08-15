@@ -77,7 +77,7 @@ cd backend
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-python seed.py          # cria técnico de teste (tecnico1 / PIN 1234) e materiais de exemplo
+SEED_DEMO_DATA=true ADMIN_SENHA='senha-local-forte' python seed.py
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
@@ -94,27 +94,26 @@ para apontar pro endereço do seu VPS.
 
 ## Deploy no VPS (produção)
 
-**Backend:**
-- Use PostgreSQL em vez de SQLite: defina a variável de ambiente
-  `DATABASE_URL=postgresql://usuario:senha@localhost/estoque_campo`
-- A senha do primeiro usuário admin (login `admin`, papel gerência) é
-  definida por `ADMIN_SENHA` (padrão `admin123` — **troque isso antes de
-  rodar `seed.py` em produção**). Depois do primeiro login, use a aba
-  "Usuários do painel" (só gerência vê essa aba) pra criar outras contas
-  com login/senha próprios e o papel adequado (gerência ou almoxarifado).
-- Rode com um processo gerenciado (recomendo `systemd` + `gunicorn` com
-  workers uvicorn, do mesmo jeito que você já faz com o Hermes):
-  ```bash
-  pip install gunicorn
-  gunicorn main:app -w 2 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000
-  ```
-- Coloque atrás de um Nginx com HTTPS (Let's Encrypt) — o navegador só deixa
-  instalar PWA e usar `serviceWorker` em HTTPS (exceto `localhost`).
+Produção usa PostgreSQL, variáveis validadas, migrações Alembic, `systemd`,
+Nginx/HTTPS, health checks e backup diário. O backend rejeita SQLite,
+segredos fracos e curingas de origem/host quando `APP_ENV=production`.
 
-**Frontend:**
-- É só HTML/JS estático — sirva com Nginx direto, ou junto do backend.
-- Depois de publicado, no celular do técnico: abrir o link no Chrome →
-  menu → "Adicionar à tela inicial". Vira um app normal.
+Fluxo de banco, sempre com as variáveis do ambiente de destino carregadas:
+
+```bash
+cd backend
+alembic -c alembic.ini upgrade head
+python preflight.py
+python seed.py
+```
+
+O `seed.py` cria somente o administrador inicial em produção. Dados de
+demonstração exigem `SEED_DEMO_DATA=true` e são bloqueados nesse ambiente.
+Consulte [DEPLOY.md](DEPLOY.md) para o procedimento completo e o ensaio de
+restauração.
+
+O frontend deve apontar apenas para a URL HTTPS do backend. No Android de
+produção, não habilite tráfego HTTP em claro.
 
 ## Cadastro central do AVEN Monitor
 
@@ -162,7 +161,10 @@ backend/
   main.py         → API (FastAPI) — inclui rotas /admin/* pro painel
   models.py       → Tabelas do banco
   database.py     → Conexão (SQLite local / Postgres em produção)
-  seed.py         → Dados iniciais de teste
+  settings.py     → Validação central do ambiente e dos segredos
+  preflight.py    → Verificações antes da inicialização em produção
+  alembic/        → Migrações versionadas do banco
+  seed.py         → Administrador inicial; demo somente quando solicitado
 frontend/
   index.html      → Tela do técnico (versão web, base do app Android)
   app.js          → Lógica + fila offline + OS atribuídas pelo admin

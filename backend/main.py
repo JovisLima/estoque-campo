@@ -11,8 +11,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, model_validator
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fpdf import FPDF
 import bcrypt
 import jwt
@@ -23,21 +25,28 @@ from monitoring_routes import (
     criar_router_monitoramento,
     resolver_origem_incidente,
 )
+from settings import settings
 
-Base.metadata.create_all(bind=engine)
+if settings.auto_create_schema:
+    Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Estoque de Campo API")
+app = FastAPI(
+    title="Estoque de Campo API",
+    docs_url="/docs" if settings.enable_api_docs else None,
+    redoc_url="/redoc" if settings.enable_api_docs else None,
+    openapi_url="/openapi.json" if settings.enable_api_docs else None,
+)
 
-PASTA_RELATORIOS = os.path.join(os.path.dirname(__file__), "relatorios")
-PASTA_FOTOS_PERFIL = os.path.join(os.path.dirname(__file__), "fotos_perfil")
-PASTA_FOTOS_OS = os.path.join(os.path.dirname(__file__), "fotos_os")
-PASTA_ROTAS_CABO = os.path.join(os.path.dirname(__file__), "rotas_cabo")
+CODE_DIR = Path(__file__).resolve().parent
+DATA_DIR = settings.data_dir
+PASTA_RELATORIOS = str(DATA_DIR / "relatorios")
+PASTA_FOTOS_PERFIL = str(DATA_DIR / "fotos_perfil")
+PASTA_FOTOS_OS = str(DATA_DIR / "fotos_os")
+PASTA_ROTAS_CABO = str(DATA_DIR / "rotas_cabo")
 os.makedirs(PASTA_RELATORIOS, exist_ok=True)
 os.makedirs(PASTA_FOTOS_PERFIL, exist_ok=True)
 os.makedirs(PASTA_ROTAS_CABO, exist_ok=True)
 os.makedirs(PASTA_FOTOS_OS, exist_ok=True)
-
-BASE_DIR = Path(__file__).resolve().parent
 
 PASTAS_ARQUIVOS = {
     "fotos_perfil",
@@ -60,14 +69,18 @@ def resolver_caminho_arquivo(caminho):
 
     for indice, parte in enumerate(partes):
         if parte in PASTAS_ARQUIVOS:
-            candidato_atual = BASE_DIR.joinpath(*partes[indice:])
+            candidato_atual = DATA_DIR.joinpath(*partes[indice:])
 
             if candidato_atual.exists():
                 return candidato_atual
 
+            candidato_legado = CODE_DIR.joinpath(*partes[indice:])
+            if candidato_legado.exists():
+                return candidato_legado
+
     # Novo formato relativo.
     if not caminho_obj.is_absolute():
-        return BASE_DIR / caminho_obj
+        return DATA_DIR / caminho_obj
 
     # Compatibilidade tempor?ria com caminho absoluto antigo,
     # caso o arquivo ainda n?o tenha sido migrado para o projeto atual.
@@ -79,29 +92,38 @@ def resolver_caminho_arquivo(caminho):
 # Em produção, restrinja para o domínio do seu app
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=list(settings.cors_allowed_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Senha única do painel Admin/Desktop. TROQUE isso em produção definindo a
-# Senha do PRIMEIRO usuário admin (gerência), criado pelo seed.py. Depois
-# disso, todo controle de acesso é por login/senha individuais — veja
-# admin_usuarios no banco. Troque isso via variável de ambiente no VPS.
-ADMIN_SENHA_INICIAL = os.getenv("ADMIN_SENHA", "admin123")
-
-# JWT do aplicativo do t?cnico.
-# Desenvolvimento local: usa chave padr?o.
-# VPS: definir JWT_SECRET_KEY no ambiente.
-JWT_SECRET_KEY = os.getenv(
-    "JWT_SECRET_KEY",
-    "aven-local-development-change-in-vps"
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=list(settings.allowed_hosts),
 )
 
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "24"))
+JWT_SECRET_KEY = settings.jwt_secret_key
 
-AVEN_MONITOR_API_TOKEN = os.getenv("AVEN_MONITOR_API_TOKEN")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = settings.jwt_expire_hours
+
+AVEN_MONITOR_API_TOKEN = settings.aven_monitor_api_token
+
+
+@app.get("/health/live", include_in_schema=False)
+def health_live():
+    return {"status": "live"}
+
+
+@app.get("/health/ready", include_in_schema=False)
+def health_ready(db: Session = Depends(get_db)):
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception as erro:
+        raise HTTPException(
+            status_code=503,
+            detail="Banco de dados indisponivel",
+        ) from erro
+    return {"status": "ready", "database": "ok"}
 
 
 def criar_token_tecnico(tecnico: models.Tecnico) -> str:

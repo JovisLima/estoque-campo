@@ -1,0 +1,11 @@
+[Unit]
+Description=Backup diario do Estoque de Campo
+
+[Timer]
+OnCalendar=*-*-* 02:15:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=estoque-campo-backup.service
+
+[Install]
+WantedBy=timers.target

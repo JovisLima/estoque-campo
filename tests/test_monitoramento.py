@@ -10,10 +10,14 @@ from fastapi.testclient import TestClient
 
 
 RAIZ = Path(__file__).resolve().parents[1]
-TEMPORARIO = tempfile.TemporaryDirectory(dir=RAIZ)
+TEMPORARIO = tempfile.TemporaryDirectory(
+    prefix="estoque-campo-tests-",
+    dir=RAIZ.parent,
+)
 BANCO = Path(TEMPORARIO.name) / "monitoramento.db"
 
 os.environ["DATABASE_URL"] = f"sqlite:///{BANCO.as_posix()}"
+os.environ["APP_ENV"] = "test"
 os.environ["AVEN_MONITOR_API_TOKEN"] = "token-monitor-teste"
 os.environ["JWT_SECRET_KEY"] = "jwt-teste-com-tamanho-suficiente"
 sys.path.insert(0, str(RAIZ / "backend"))
@@ -138,6 +142,16 @@ def test_api_nao_permite_cadastro_ja_ativo(cliente_http):
 
     assert resposta.status_code == 409
     assert "cadastrado inativo" in resposta.json()["detail"]
+
+
+def test_endpoints_de_saude(cliente_http):
+    live = cliente_http.get("/health/live")
+    ready = cliente_http.get("/health/ready")
+
+    assert live.status_code == 200
+    assert live.json() == {"status": "live"}
+    assert ready.status_code == 200
+    assert ready.json() == {"status": "ready", "database": "ok"}
 
 
 def executar_teste_com_sucesso(cliente_http, headers, dispositivo_id):

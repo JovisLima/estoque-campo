@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: estoque_ci
+          POSTGRES_USER: estoque_ci
+          POSTGRES_PASSWORD: estoque_ci_senha
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U estoque_ci -d estoque_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      APP_ENV: test
+      AUTO_CREATE_SCHEMA: "false"
+      DATABASE_URL: postgresql://estoque_ci:estoque_ci_senha@localhost:5432/estoque_ci
+      JWT_SECRET_KEY: jwt-ci-com-tamanho-suficiente-para-testes
+      AVEN_MONITOR_API_TOKEN: token-monitor-ci-com-tamanho-suficiente
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Migração PostgreSQL
+        working-directory: backend
+        run: |
+          alembic -c alembic.ini upgrade head
+          alembic -c alembic.ini current
+          alembic -c alembic.ini check
+      - name: Testes
+        run: pytest -q
+      - name: Sintaxe Python e JavaScript
+        run: |
+          python -m py_compile backend/*.py backend/alembic/*.py \
+            backend/alembic/versions/*.py tests/*.py scripts/*.py
+          node --check desktop-admin/src/app.js
+      - name: Dependências e segredos
+        run: |
+          pip check
+          python scripts/check_secrets.py
