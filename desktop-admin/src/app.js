@@ -8,6 +8,15 @@ let adminLogin = adminAtual?.login || "";
 let tecnicosCache = [];
 let ferramentasDisponiveisCache = [];
 
+function escaparHtml(valor) {
+  return String(valor ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
 function authHeaders() {
   const resultado = {};
 
@@ -53,7 +62,7 @@ async function carregarFotoTecnicoAdmin(img, tecnicoId) {
 
 // Abas que só o papel "gerencia" pode ver. Almoxarifado só mexe em
 // estoque/transferências/solicitações/avisos.
-const ABAS_SOMENTE_GERENCIA = ["ordens", "tecnicos", "financeiro", "usuarios", "clientes"];
+const ABAS_SOMENTE_GERENCIA = ["ordens", "tecnicos", "financeiro", "usuarios", "clientes", "monitoramento"];
 
 // ===== LOGIN =====
 async function fazerLoginAdmin() {
@@ -168,7 +177,7 @@ function logoutAdmin() {
 // ===== NAVEGAÇÃO ENTRE ABAS =====
 function mudarAba(aba) {
   document.querySelectorAll(".aba").forEach(el => el.classList.toggle("ativa", el.dataset.aba === aba));
-  ["inicio", "estoque", "transferencias", "solicitacoes", "ordens", "tecnicos", "avisos", "financeiro", "usuarios", "clientes"].forEach(a => {
+  ["inicio", "estoque", "transferencias", "solicitacoes", "ordens", "tecnicos", "avisos", "financeiro", "usuarios", "clientes", "monitoramento"].forEach(a => {
     const painel = document.getElementById(`painel-${a}`);
     if (painel) painel.classList.toggle("oculto", a !== aba);
   });
@@ -176,6 +185,7 @@ function mudarAba(aba) {
   if (aba === "financeiro") carregarFinanceiro();
   if (aba === "usuarios") carregarAdminUsuarios();
   if (aba === "clientes") carregarClientes();
+  if (aba === "monitoramento") carregarMonitoramento();
   if (aba === "ordens") carregarClientesParaSelect();
 }
 
@@ -887,7 +897,9 @@ async function carregarOrdens() {
     <tr style="${o.prioridade ? 'background:rgba(220,38,38,0.08);' : ''}">
       <td>${o.prioridade ? "🔴" : ""}</td>
       <td>#${o.id}</td>
-      <td>${o.criada_por_admin
+      <td>${o.origem === "monitor"
+          ? `<span style="color:#fb923c;">📡 AVEN Monitor</span>`
+          : o.criada_por_admin
           ? (o.tipo === "preventiva" ? `<span style="color:#a78bfa;">🛠️ Auto (preventiva)</span>` : `<span style="color:#93c5fd;">Atribuída</span>`)
           : `<span style="color:#fbbf24;">⚡ Avulsa (técnico)</span>`}</td>
       <td>${o.cliente_local}${o.nome_cliente ? `<br><span style="color:#94a3b8;font-size:12px;">👤 ${o.nome_cliente}</span>` : ""}${o.endereco ? `<br><span style="color:#94a3b8;font-size:12px;">📍 ${o.endereco}</span>` : ""}
@@ -1147,6 +1159,281 @@ async function verHistoricoCliente(id) {
     </table>
     <button class="secundario" onclick="document.getElementById('detalhe-cliente').classList.add('oculto')">Fechar</button>
   `;
+}
+
+// ===== MONITORAMENTO (cliente > unidade > dispositivo > links) =====
+function adicionarLinkMonitoramento(valores = {}) {
+  const container = document.getElementById("mon-links-form");
+  const linha = document.createElement("div");
+  linha.className = "painel monitor-link-row";
+  linha.style.background = "#0d1424";
+  linha.style.marginBottom = "10px";
+  linha.innerHTML = `
+    <div class="grid2">
+      <div><label>Código do link</label><input class="mon-link-codigo" placeholder="ex: WAN-VIVO"></div>
+      <div><label>Nome exibido</label><input class="mon-link-nome" placeholder="ex: LINK VIVO"></div>
+    </div>
+    <div class="grid2">
+      <div><label>Operadora</label><input class="mon-link-operadora" placeholder="ex: VIVO"></div>
+      <div><label>ifIndex SNMP</label><input class="mon-link-ifindex" type="number" min="1"></div>
+    </div>
+    <label>Papel</label>
+    <select class="mon-link-papel">
+      <option value="PRIMARIO">Primário</option>
+      <option value="BACKUP">Backup</option>
+    </select>
+    <button class="pequeno perigo" type="button">Remover link</button>
+  `;
+
+  linha.querySelector(".mon-link-codigo").value = valores.codigo || "";
+  linha.querySelector(".mon-link-nome").value = valores.nome || "";
+  linha.querySelector(".mon-link-operadora").value = valores.operadora || "";
+  linha.querySelector(".mon-link-ifindex").value = valores.if_index || "";
+  linha.querySelector(".mon-link-papel").value = valores.papel || "PRIMARIO";
+  linha.querySelector("button").addEventListener("click", () => linha.remove());
+  container.appendChild(linha);
+}
+
+function prepararLinksMonitoramento() {
+  const container = document.getElementById("mon-links-form");
+  if (container.children.length > 0) return;
+
+  adicionarLinkMonitoramento({
+    codigo: "WAN-PRIMARIA",
+    nome: "LINK PRIMARIO",
+    papel: "PRIMARIO",
+  });
+  adicionarLinkMonitoramento({
+    codigo: "WAN-BACKUP",
+    nome: "LINK BACKUP",
+    papel: "BACKUP",
+  });
+}
+
+async function carregarMonitoramento() {
+  prepararLinksMonitoramento();
+
+  const [respostaClientes, respostaTopologia] = await Promise.all([
+    fetch(`${API_URL}/admin/clientes`, { headers: headers() }),
+    fetch(`${API_URL}/admin/monitoramento/topologia`, { headers: headers() }),
+  ]);
+
+  if (!respostaClientes.ok || !respostaTopologia.ok) {
+    document.getElementById("monitoramento-lista").textContent =
+      "Não foi possível carregar o monitoramento.";
+    return;
+  }
+
+  const clientes = await respostaClientes.json();
+  const topologia = await respostaTopologia.json();
+  const select = document.getElementById("mon-cliente");
+
+  select.innerHTML = `<option value="">Escolha o cliente</option>` +
+    clientes.map(cliente =>
+      `<option value="${cliente.id}">${escaparHtml(cliente.nome)}</option>`
+    ).join("");
+
+  renderizarTopologiaMonitoramento(topologia);
+}
+
+function renderizarTopologiaMonitoramento(topologia) {
+  const container = document.getElementById("monitoramento-lista");
+
+  if (!topologia.length) {
+    container.innerHTML = `<p style="color:#64748b;">Nenhuma unidade monitorada cadastrada.</p>`;
+    return;
+  }
+
+  container.innerHTML = topologia.map(cliente => `
+    <div style="margin-bottom:24px;">
+      <h3>${escaparHtml(cliente.cliente.nome)} <span style="color:#64748b; font-size:12px;">${escaparHtml(cliente.codigo)}</span></h3>
+      ${cliente.unidades.map(unidade => `
+        <div class="painel" style="background:#0d1424;">
+          <strong>${escaparHtml(unidade.nome)}</strong>
+          <span style="color:#94a3b8;"> — ${escaparHtml(unidade.cidade)}${unidade.estado ? `/${escaparHtml(unidade.estado)}` : ""}</span>
+          <div style="color:#64748b; font-size:12px; margin:4px 0 10px;">${escaparHtml(unidade.codigo)}</div>
+          ${unidade.dispositivos.map(dispositivo => `
+            <div style="border-top:1px solid #232e47; padding-top:12px; margin-top:10px;">
+              <div style="display:flex; justify-content:space-between; gap:12px; align-items:center;">
+                <div>
+                  <strong>${escaparHtml(dispositivo.nome)}</strong>
+                  <span class="${dispositivo.ativo ? "status-disponivel" : "status-baixada"}">
+                    ${dispositivo.ativo ? "ATIVO" : "INATIVO"}
+                  </span>
+                  <div style="font-size:12px; color:#94a3b8;">
+                    ${escaparHtml(dispositivo.codigo)} · ${escaparHtml(dispositivo.fabricante)} · WG ${escaparHtml(dispositivo.ip_wireguard)}
+                  </div>
+                  <div style="font-size:12px; color:#fbbf24; margin-top:3px;">
+                    Segredo na VPS: ${escaparHtml(dispositivo.community_chave)}
+                  </div>
+                  <div style="font-size:12px; margin-top:3px; color:${dispositivo.ultimo_teste?.sucesso ? "#86efac" : "#fca5a5"};">
+                    Teste: ${dispositivo.ultimo_teste
+                      ? `${escaparHtml(dispositivo.ultimo_teste.status)}${dispositivo.ultimo_teste.mensagem ? ` — ${escaparHtml(dispositivo.ultimo_teste.mensagem)}` : ""}`
+                      : "ainda não executado"}
+                  </div>
+                </div>
+                <div>
+                  <button class="pequeno secundario"
+                    onclick="solicitarTesteMonitoramento(${dispositivo.id})">
+                    Testar conectividade
+                  </button>
+                  <button class="pequeno ${dispositivo.ativo ? "perigo" : ""}"
+                    onclick="alterarDispositivoMonitoramento(${dispositivo.id}, ${!dispositivo.ativo})">
+                    ${dispositivo.ativo ? "Desativar" : "Ativar"}
+                  </button>
+                </div>
+              </div>
+              <table>
+                <thead><tr><th>Link</th><th>Operadora</th><th>Papel</th><th>ifIndex</th><th>Status</th></tr></thead>
+                <tbody>
+                  ${dispositivo.links.map(link => `
+                    <tr>
+                      <td>${escaparHtml(link.nome)}<br><span style="color:#64748b;font-size:11px;">${escaparHtml(link.codigo)}</span></td>
+                      <td>${escaparHtml(link.operadora)}</td>
+                      <td>${escaparHtml(link.papel)}</td>
+                      <td>${link.if_index}</td>
+                      <td>${link.ativo ? "ativo" : "inativo"}</td>
+                    </tr>
+                  `).join("")}
+                </tbody>
+              </table>
+            </div>
+          `).join("")}
+        </div>
+      `).join("")}
+    </div>
+  `).join("");
+}
+
+async function cadastrarTopologiaMonitoramento() {
+  const msg = document.getElementById("mon-msg");
+  const links = [...document.querySelectorAll(".monitor-link-row")].map(linha => ({
+    codigo: linha.querySelector(".mon-link-codigo").value.trim(),
+    nome: linha.querySelector(".mon-link-nome").value.trim(),
+    operadora: linha.querySelector(".mon-link-operadora").value.trim(),
+    if_index: Number(linha.querySelector(".mon-link-ifindex").value),
+    papel: linha.querySelector(".mon-link-papel").value,
+    ativo: true,
+  }));
+
+  const dados = {
+    cliente_id: Number(document.getElementById("mon-cliente").value),
+    cliente_codigo: document.getElementById("mon-cliente-codigo").value.trim(),
+    unidade_codigo: document.getElementById("mon-unidade-codigo").value.trim(),
+    unidade_nome: document.getElementById("mon-unidade-nome").value.trim(),
+    cidade: document.getElementById("mon-cidade").value.trim(),
+    estado: document.getElementById("mon-estado").value.trim() || null,
+    dispositivo_codigo: document.getElementById("mon-dispositivo-codigo").value.trim(),
+    dispositivo_nome: document.getElementById("mon-dispositivo-nome").value.trim(),
+    fabricante: document.getElementById("mon-fabricante").value.trim(),
+    ip_wireguard: document.getElementById("mon-ip-wireguard").value.trim(),
+    ativo: false,
+    links,
+  };
+
+  if (
+    !dados.cliente_id || !dados.cliente_codigo || !dados.unidade_codigo ||
+    !dados.unidade_nome || !dados.cidade || !dados.dispositivo_codigo ||
+    !dados.dispositivo_nome || !dados.fabricante || !dados.ip_wireguard ||
+    !links.length || links.some(link => !link.codigo || !link.nome || !link.operadora || !link.if_index)
+  ) {
+    msg.style.color = "#f87171";
+    msg.textContent = "Preencha o cliente, unidade, dispositivo e todos os campos dos links.";
+    return;
+  }
+
+  const resposta = await fetch(`${API_URL}/admin/monitoramento/topologias`, {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify(dados),
+  });
+  const resultado = await resposta.json().catch(() => ({}));
+
+  if (!resposta.ok) {
+    msg.style.color = "#f87171";
+    msg.textContent = resultado.detail || "Não foi possível cadastrar a topologia.";
+    return;
+  }
+
+  msg.style.color = "#86efac";
+  msg.textContent = `Cadastro salvo inativo. Configure na VPS: ${resultado.community_chave}`;
+  document.getElementById("mon-dispositivo-codigo").value = "";
+  document.getElementById("mon-dispositivo-nome").value = "";
+  document.getElementById("mon-ip-wireguard").value = "";
+  await carregarMonitoramento();
+}
+
+async function alterarDispositivoMonitoramento(id, ativo) {
+  if (ativo && !confirm(
+    "Confirma que WireGuard, community SNMP e ifIndex já foram validados na VPS?"
+  )) return;
+
+  const resposta = await fetch(
+    `${API_URL}/admin/monitoramento/dispositivos/${id}/ativo`,
+    {
+      method: "PATCH",
+      headers: headers(),
+      body: JSON.stringify({ ativo }),
+    }
+  );
+  const resultado = await resposta.json().catch(() => ({}));
+
+  if (!resposta.ok) {
+    alert(resultado.detail || "Não foi possível alterar o dispositivo.");
+    return;
+  }
+
+  await carregarMonitoramento();
+}
+
+async function solicitarTesteMonitoramento(dispositivoId) {
+  const resposta = await fetch(
+    `${API_URL}/admin/monitoramento/dispositivos/${dispositivoId}/testes`,
+    {
+      method: "POST",
+      headers: headers(),
+    }
+  );
+  const resultado = await resposta.json().catch(() => ({}));
+
+  if (!resposta.ok) {
+    alert(resultado.detail || "Não foi possível solicitar o teste.");
+    return;
+  }
+
+  alert("Teste solicitado. O agente AVEN Monitor executará pela rede WireGuard.");
+  acompanharTesteMonitoramento(resultado.id, 0);
+}
+
+async function acompanharTesteMonitoramento(testeId, tentativa) {
+  const resposta = await fetch(
+    `${API_URL}/admin/monitoramento/testes/${testeId}`,
+    { headers: headers() }
+  );
+
+  if (!resposta.ok) return;
+
+  const teste = await resposta.json();
+  if (teste.status === "SUCESSO" || teste.status === "ERRO") {
+    await carregarMonitoramento();
+    alert(
+      teste.status === "SUCESSO"
+        ? "Conectividade validada. O dispositivo pode ser ativado."
+        : `Teste falhou: ${teste.resultado?.mensagem || "verifique WireGuard, SNMP e community"}`
+    );
+    return;
+  }
+
+  if (tentativa >= 45) {
+    await carregarMonitoramento();
+    alert("O teste continua pendente. Confirme se o serviço AVEN Monitor está em execução.");
+    return;
+  }
+
+  setTimeout(
+    () => acompanharTesteMonitoramento(testeId, tentativa + 1),
+    2000,
+  );
 }
 
 // atualiza os dados a cada 20s pra refletir o que os técnicos foram fazendo em campo

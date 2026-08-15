@@ -121,6 +121,179 @@ class Cliente(Base):
         return bool(self.imagem_rota_cabo)
 
 
+class MonitorCliente(Base):
+    """Vincula um cliente existente a um codigo estavel do AVEN Monitor."""
+
+    __tablename__ = "monitor_clientes"
+
+    id = Column(Integer, primary_key=True)
+    cliente_id = Column(
+        Integer,
+        ForeignKey("clientes.id"),
+        unique=True,
+        nullable=False,
+    )
+    codigo = Column(String, unique=True, nullable=False)
+    ativo = Column(Boolean, default=True, nullable=False)
+    criado_em = Column(DateTime, default=datetime.utcnow, nullable=False)
+    atualizado_em = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    cliente = relationship("Cliente")
+    unidades = relationship(
+        "MonitorUnidade",
+        back_populates="monitor_cliente",
+        cascade="all, delete-orphan",
+    )
+
+
+class MonitorUnidade(Base):
+    """Unidade fisica, usina ou filial pertencente a um cliente."""
+
+    __tablename__ = "monitor_unidades"
+
+    id = Column(Integer, primary_key=True)
+    monitor_cliente_id = Column(
+        Integer,
+        ForeignKey("monitor_clientes.id"),
+        nullable=False,
+    )
+    codigo = Column(String, unique=True, nullable=False)
+    nome = Column(String, nullable=False)
+    cidade = Column(String, nullable=False)
+    estado = Column(String, nullable=True)
+    ativo = Column(Boolean, default=True, nullable=False)
+    criado_em = Column(DateTime, default=datetime.utcnow, nullable=False)
+    atualizado_em = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    monitor_cliente = relationship(
+        "MonitorCliente",
+        back_populates="unidades",
+    )
+    dispositivos = relationship(
+        "MonitorDispositivo",
+        back_populates="unidade",
+        cascade="all, delete-orphan",
+    )
+
+
+class MonitorDispositivo(Base):
+    """Roteador ou equipamento consultado pelo agente de monitoramento."""
+
+    __tablename__ = "monitor_dispositivos"
+
+    id = Column(Integer, primary_key=True)
+    unidade_id = Column(
+        Integer,
+        ForeignKey("monitor_unidades.id"),
+        nullable=False,
+    )
+    codigo = Column(String, unique=True, nullable=False)
+    nome = Column(String, nullable=False)
+    fabricante = Column(String, nullable=False)
+    ip_wireguard = Column(String, unique=True, nullable=False)
+    ativo = Column(Boolean, default=False, nullable=False)
+    criado_em = Column(DateTime, default=datetime.utcnow, nullable=False)
+    atualizado_em = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    unidade = relationship(
+        "MonitorUnidade",
+        back_populates="dispositivos",
+    )
+    links = relationship(
+        "MonitorLink",
+        back_populates="dispositivo",
+        cascade="all, delete-orphan",
+    )
+    testes = relationship(
+        "MonitorTesteConfiguracao",
+        back_populates="dispositivo",
+        cascade="all, delete-orphan",
+    )
+
+
+class MonitorLink(Base):
+    """WAN monitorada de um equipamento."""
+
+    __tablename__ = "monitor_links"
+
+    id = Column(Integer, primary_key=True)
+    dispositivo_id = Column(
+        Integer,
+        ForeignKey("monitor_dispositivos.id"),
+        nullable=False,
+    )
+    codigo = Column(String, nullable=False)
+    nome = Column(String, nullable=False)
+    if_index = Column(Integer, nullable=False)
+    operadora = Column(String, nullable=False)
+    papel = Column(String, nullable=False)
+    ativo = Column(Boolean, default=True, nullable=False)
+    criado_em = Column(DateTime, default=datetime.utcnow, nullable=False)
+    atualizado_em = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    dispositivo = relationship(
+        "MonitorDispositivo",
+        back_populates="links",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "dispositivo_id",
+            "codigo",
+            name="uq_monitor_link_codigo_dispositivo",
+        ),
+        UniqueConstraint(
+            "dispositivo_id",
+            "if_index",
+            name="uq_monitor_link_ifindex_dispositivo",
+        ),
+    )
+
+
+class MonitorTesteConfiguracao(Base):
+    """Solicitacao de teste executada pelo agente antes da ativacao."""
+
+    __tablename__ = "monitor_testes_configuracao"
+
+    id = Column(Integer, primary_key=True)
+    dispositivo_id = Column(
+        Integer,
+        ForeignKey("monitor_dispositivos.id"),
+        nullable=False,
+    )
+    status = Column(String, default="PENDENTE", nullable=False)
+    sucesso = Column(Boolean, nullable=True)
+    resultado = Column(Text, nullable=True)
+    solicitado_em = Column(DateTime, default=datetime.utcnow, nullable=False)
+    iniciado_em = Column(DateTime, nullable=True)
+    finalizado_em = Column(DateTime, nullable=True)
+
+    dispositivo = relationship(
+        "MonitorDispositivo",
+        back_populates="testes",
+    )
+
+
 class Tecnico(Base):
     __tablename__ = "tecnicos"
     id = Column(Integer, primary_key=True)
@@ -256,6 +429,50 @@ class OrdemServico(Base):
     cliente = relationship("Cliente")
     movimentacoes = relationship("MovimentacaoEstoque", back_populates="ordem")
     fotos = relationship("FotoOrdem", back_populates="ordem")
+    monitor_ocorrencia = relationship(
+        "MonitorOcorrencia",
+        back_populates="ordem",
+        uselist=False,
+    )
+
+
+class MonitorOcorrencia(Base):
+    """Mantem a origem monitorada da OS sem alterar o fluxo do tecnico."""
+
+    __tablename__ = "monitor_ocorrencias"
+
+    id = Column(Integer, primary_key=True)
+    ordem_id = Column(
+        Integer,
+        ForeignKey("ordens_servico.id"),
+        unique=True,
+        nullable=False,
+    )
+    unidade_id = Column(
+        Integer,
+        ForeignKey("monitor_unidades.id"),
+        nullable=False,
+    )
+    dispositivo_id = Column(
+        Integer,
+        ForeignKey("monitor_dispositivos.id"),
+        nullable=False,
+    )
+    link_id = Column(
+        Integer,
+        ForeignKey("monitor_links.id"),
+        nullable=True,
+    )
+    tipo = Column(String, nullable=False)
+    inicio = Column(DateTime, nullable=False)
+
+    ordem = relationship(
+        "OrdemServico",
+        back_populates="monitor_ocorrencia",
+    )
+    unidade = relationship("MonitorUnidade")
+    dispositivo = relationship("MonitorDispositivo")
+    link = relationship("MonitorLink")
 
 
 class MovimentacaoEstoque(Base):

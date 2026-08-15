@@ -19,6 +19,10 @@ import jwt
 
 import models
 from database import Base, engine, get_db
+from monitoring_routes import (
+    criar_router_monitoramento,
+    resolver_origem_incidente,
+)
 
 Base.metadata.create_all(bind=engine)
 
@@ -227,6 +231,14 @@ def exigir_papel(*papeis_permitidos):
             raise HTTPException(status_code=403, detail="Sem permissão pra acessar essa área")
         return admin
     return dependencia
+
+
+app.include_router(
+    criar_router_monitoramento(
+        exigir_papel(),
+        exigir_aven_monitor,
+    )
+)
 
 
 def gerar_pdf_ordem(ordem: models.OrdemServico) -> str:
@@ -500,6 +512,10 @@ class MonitorIncidenteCreate(BaseModel):
     link: Optional[str] = None
     operadora: Optional[str] = None
     papel: Optional[str] = None
+    cliente_codigo: Optional[str] = None
+    unidade_codigo: Optional[str] = None
+    dispositivo_codigo: Optional[str] = None
+    link_codigo: Optional[str] = None
 
     @model_validator(mode="after")
     def validar_tipo_incidente(self):
@@ -543,7 +559,10 @@ def gerar_client_uuid_monitor(
     ]
 
     if dados.tipo == "LINK":
-        partes.append(dados.link)
+        partes.append(
+            dados.link_codigo
+            or dados.link
+        )
 
     partes.append(
         dados.inicio.isoformat(
@@ -1364,6 +1383,11 @@ def criar_ordem_incidente_monitor(
     if existente:
         return existente
 
+    origem = resolver_origem_incidente(
+        db,
+        dados,
+    )
+
     observacoes = [
         "OS criada automaticamente pelo AVEN Monitor.",
         f"Tipo de incidente: {dados.tipo}",
@@ -1385,13 +1409,39 @@ def criar_ordem_incidente_monitor(
             f"Equipamento: {dados.equipamento}"
         )
 
+    cliente_id = None
+    nome_cliente = None
+    endereco = None
+    cliente_local = dados.local
+
+    if origem:
+        monitor_cliente = origem["monitor_cliente"]
+        unidade = origem["unidade"]
+        dispositivo = origem["dispositivo"]
+
+        cliente_id = monitor_cliente.cliente_id
+        nome_cliente = monitor_cliente.cliente.nome
+        endereco = monitor_cliente.cliente.endereco
+        cliente_local = unidade.nome
+
+        observacoes.extend([
+            f"Cliente codigo: {monitor_cliente.codigo}",
+            f"Unidade codigo: {unidade.codigo}",
+            f"Dispositivo codigo: {dispositivo.codigo}",
+        ])
+
+        if origem["link"]:
+            observacoes.append(
+                f"Link codigo: {origem['link'].codigo}"
+            )
+
     ordem = models.OrdemServico(
         tecnico_id=None,
-        cliente_id=None,
+        cliente_id=cliente_id,
         tipo=models.TipoOS.manutencao,
-        cliente_local=dados.local,
-        nome_cliente=None,
-        endereco=None,
+        cliente_local=cliente_local,
+        nome_cliente=nome_cliente,
+        endereco=endereco,
         prioridade=False,
         observacoes="\n".join(observacoes),
         status=models.StatusOS.pendente,
@@ -1402,6 +1452,21 @@ def criar_ordem_incidente_monitor(
     db.add(ordem)
 
     try:
+        if origem:
+            db.flush()
+            db.add(models.MonitorOcorrencia(
+                ordem_id=ordem.id,
+                unidade_id=origem["unidade"].id,
+                dispositivo_id=origem["dispositivo"].id,
+                link_id=(
+                    origem["link"].id
+                    if origem["link"]
+                    else None
+                ),
+                tipo=dados.tipo,
+                inicio=dados.inicio,
+            ))
+
         db.commit()
 
     except IntegrityError:
@@ -2361,6 +2426,15 @@ def admin_listar_ordens(status: Optional[str] = None, cliente_id: Optional[int] 
             "nome_cliente": o.nome_cliente, "endereco": o.endereco, "prioridade": o.prioridade,
             "status": o.status, "tecnico_id": o.tecnico_id, "tecnico": o.tecnico.nome if o.tecnico else "Nao atribuido",
             "criada_por_admin": o.criada_por_admin,
+            "origem": (
+                "monitor"
+                if o.monitor_ocorrencia
+                else (
+                    "admin"
+                    if o.criada_por_admin
+                    else "tecnico"
+                )
+            ),
             "lat_inicio": o.lat_inicio, "lon_inicio": o.lon_inicio,
             "lat_fim": o.lat_fim, "lon_fim": o.lon_fim,
             "data_abertura": o.data_abertura, "data_fechamento": o.data_fechamento,

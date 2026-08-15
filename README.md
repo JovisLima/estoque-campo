@@ -116,6 +116,35 @@ para apontar pro endereço do seu VPS.
 - Depois de publicado, no celular do técnico: abrir o link no Chrome →
   menu → "Adicionar à tela inicial". Vira um app normal.
 
+## Cadastro central do AVEN Monitor
+
+A aba `Monitoramento` do Desk permite cadastrar a hierarquia:
+
+```text
+Cliente > Unidade > Dispositivo > Links WAN
+```
+
+O cadastro nasce inativo. Depois de configurar WireGuard e a community no
+servidor do agente, a Gerência solicita um teste de conectividade pelo Desk.
+O AVEN Monitor consulta `sysName.0` e `ifOperStatus` e devolve o resultado ao
+backend. Somente um teste bem-sucedido nos últimos 30 minutos libera a
+ativação.
+
+Dispositivos ativos são entregues ao agente por uma rota autenticada. A
+community, as chaves privadas do WireGuard e os tokens não são armazenados no
+cadastro nem enviados ao Desk.
+
+As OS automáticas ficam vinculadas ao cliente, à unidade, ao dispositivo e ao
+link por códigos estáveis. O contrato anterior de incidentes continua aceito
+para permitir implantação gradual.
+
+Testes do módulo:
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q tests/test_monitoramento.py
+```
+
 ## Próximos passos sugeridos
 
 - Alertas de estoque baixo no Telegram, reaproveitando o bot que você já
