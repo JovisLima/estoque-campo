@@ -1,6 +1,6 @@
 from sqlalchemy import (
-    Column, Integer, String, Float, DateTime, ForeignKey, Enum, Text, Boolean,
-    UniqueConstraint,
+    Boolean, Column, Date, DateTime, Enum, Float, ForeignKey, Index, Integer,
+    Numeric, String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -95,11 +95,11 @@ class ContaFinanceira(Base):
     id = Column(Integer, primary_key=True)
     tipo = Column(Enum(TipoConta), nullable=False)
     descricao = Column(String, nullable=False)
-    valor = Column(Float, nullable=False)
-    vencimento = Column(String, nullable=False)  # "AAAA-MM-DD"
+    valor = Column(Numeric(14, 2), nullable=False)
+    vencimento = Column(Date, nullable=False)
     categoria = Column(String, nullable=True)  # ex: fornecedor, cliente, salário, imposto
     status = Column(Enum(StatusConta), default=StatusConta.pendente)
-    data_pagamento = Column(String, nullable=True)
+    data_pagamento = Column(Date, nullable=True)
     observacoes = Column(Text, nullable=True)
     criada_em = Column(DateTime, default=datetime.utcnow)
 
@@ -242,6 +242,9 @@ class MonitorLink(Base):
     if_index = Column(Integer, nullable=False)
     operadora = Column(String, nullable=False)
     papel = Column(String, nullable=False)
+    probe_tipo = Column(String, nullable=True)
+    probe_host = Column(String, nullable=True)
+    probe_porta = Column(Integer, nullable=True)
     ativo = Column(Boolean, default=True, nullable=False)
     criado_em = Column(DateTime, default=datetime.utcnow, nullable=False)
     atualizado_em = Column(
@@ -266,6 +269,10 @@ class MonitorLink(Base):
             "dispositivo_id",
             "if_index",
             name="uq_monitor_link_ifindex_dispositivo",
+        ),
+        UniqueConstraint(
+            "probe_host",
+            name="uq_monitor_links_probe_host",
         ),
     )
 
@@ -292,6 +299,123 @@ class MonitorTesteConfiguracao(Base):
         "MonitorDispositivo",
         back_populates="testes",
     )
+
+
+class MonitorAgente(Base):
+    """Credencial individual de uma instalacao do AVEN Monitor."""
+
+    __tablename__ = "monitor_agentes"
+
+    id = Column(Integer, primary_key=True)
+    codigo = Column(String(64), unique=True, nullable=False)
+    nome = Column(String(160), nullable=False)
+    token_hash = Column(String(64), nullable=False)
+    ativo = Column(Boolean, default=True, nullable=False)
+    criado_em = Column(DateTime(timezone=True), nullable=False)
+    token_rotacionado_em = Column(DateTime(timezone=True), nullable=False)
+    ultimo_contato_em = Column(DateTime(timezone=True), nullable=True)
+    ultima_versao_config = Column(String(64), nullable=True)
+    ultimo_status = Column(Text, nullable=True)
+
+
+class MonitorConfiguracaoVersao(Base):
+    """Snapshot imutavel da configuracao entregue aos agentes."""
+
+    __tablename__ = "monitor_configuracoes_versoes"
+
+    id = Column(Integer, primary_key=True)
+    versao = Column(String(64), nullable=False, index=True)
+    conteudo = Column(Text, nullable=False)
+    ativa = Column(Boolean, default=True, nullable=False, index=True)
+    motivo = Column(String(240), nullable=False)
+    criada_em = Column(DateTime(timezone=True), nullable=False)
+    criada_por_admin_id = Column(
+        Integer,
+        ForeignKey("admin_usuarios.id"),
+        nullable=True,
+    )
+
+
+class MonitorJanelaManutencao(Base):
+    """Suspende alertas em um escopo e periodo definidos."""
+
+    __tablename__ = "monitor_janelas_manutencao"
+
+    id = Column(Integer, primary_key=True)
+    monitor_cliente_id = Column(
+        Integer,
+        ForeignKey("monitor_clientes.id"),
+        nullable=True,
+    )
+    unidade_id = Column(
+        Integer,
+        ForeignKey("monitor_unidades.id"),
+        nullable=True,
+    )
+    dispositivo_id = Column(
+        Integer,
+        ForeignKey("monitor_dispositivos.id"),
+        nullable=True,
+    )
+    link_id = Column(
+        Integer,
+        ForeignKey("monitor_links.id"),
+        nullable=True,
+    )
+    inicio = Column(DateTime(timezone=True), nullable=False)
+    fim = Column(DateTime(timezone=True), nullable=False)
+    motivo = Column(String(500), nullable=False)
+    criado_por_admin_id = Column(
+        Integer,
+        ForeignKey("admin_usuarios.id"),
+        nullable=False,
+    )
+    criado_em = Column(DateTime(timezone=True), nullable=False)
+    cancelada_em = Column(DateTime(timezone=True), nullable=True)
+
+    monitor_cliente = relationship("MonitorCliente")
+    unidade = relationship("MonitorUnidade")
+    dispositivo = relationship("MonitorDispositivo")
+    link = relationship("MonitorLink")
+
+    __table_args__ = (
+        Index("ix_monitor_janela_periodo", "inicio", "fim"),
+    )
+
+
+class AuditoriaEvento(Base):
+    """Trilha imutavel das alteracoes administrativas e operacionais."""
+
+    __tablename__ = "auditoria_eventos"
+
+    id = Column(Integer, primary_key=True)
+    ator_tipo = Column(String(32), nullable=False)
+    ator_id = Column(Integer, nullable=True)
+    ator_codigo = Column(String(160), nullable=True)
+    acao = Column(String(120), nullable=False)
+    entidade_tipo = Column(String(120), nullable=False)
+    entidade_id = Column(String(120), nullable=True)
+    antes = Column(Text, nullable=True)
+    depois = Column(Text, nullable=True)
+    criado_em = Column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class MonitorHeartbeat(Base):
+    """Amostra operacional enviada periodicamente por um agente."""
+
+    __tablename__ = "monitor_heartbeats"
+
+    id = Column(Integer, primary_key=True)
+    agente_id = Column(
+        Integer,
+        ForeignKey("monitor_agentes.id"),
+        nullable=False,
+    )
+    recebido_em = Column(DateTime(timezone=True), nullable=False, index=True)
+    versao_config = Column(String(64), nullable=True)
+    status = Column(Text, nullable=False)
+
+    agente = relationship("MonitorAgente")
 
 
 class Tecnico(Base):
@@ -324,7 +448,7 @@ class Material(Base):
     unidade = Column(String, default="un")  # un, m, cx, etc.
     qtd_atual = Column(Float, default=0)     # estoque CENTRAL (almoxarifado)
     qtd_minima = Column(Float, default=0)
-    custo_unitario = Column(Float, default=0)
+    custo_unitario = Column(Numeric(14, 4), default=0)
 
     movimentacoes = relationship("MovimentacaoEstoque", back_populates="material")
 
@@ -465,12 +589,54 @@ class MonitorOcorrencia(Base):
     )
     tipo = Column(String, nullable=False)
     inicio = Column(DateTime, nullable=False)
+    ultima_ocorrencia_em = Column(DateTime, nullable=False)
+    causa_provavel = Column(String(80), nullable=False, default="INDETERMINADA")
 
     ordem = relationship(
         "OrdemServico",
         back_populates="monitor_ocorrencia",
     )
     unidade = relationship("MonitorUnidade")
+    dispositivo = relationship("MonitorDispositivo")
+    link = relationship("MonitorLink")
+    eventos = relationship(
+        "MonitorEventoOcorrencia",
+        back_populates="ocorrencia",
+        cascade="all, delete-orphan",
+    )
+
+
+class MonitorEventoOcorrencia(Base):
+    """Sintoma deduplicado e correlacionado a uma unica OS raiz."""
+
+    __tablename__ = "monitor_eventos_ocorrencia"
+
+    id = Column(Integer, primary_key=True)
+    ocorrencia_id = Column(
+        Integer,
+        ForeignKey("monitor_ocorrencias.id"),
+        nullable=False,
+    )
+    dispositivo_id = Column(
+        Integer,
+        ForeignKey("monitor_dispositivos.id"),
+        nullable=False,
+    )
+    link_id = Column(
+        Integer,
+        ForeignKey("monitor_links.id"),
+        nullable=True,
+    )
+    chave_evento = Column(String(160), unique=True, nullable=False)
+    tipo = Column(String(32), nullable=False)
+    inicio = Column(DateTime, nullable=False)
+    payload = Column(Text, nullable=False)
+    criado_em = Column(DateTime(timezone=True), nullable=False)
+
+    ocorrencia = relationship(
+        "MonitorOcorrencia",
+        back_populates="eventos",
+    )
     dispositivo = relationship("MonitorDispositivo")
     link = relationship("MonitorLink")
 

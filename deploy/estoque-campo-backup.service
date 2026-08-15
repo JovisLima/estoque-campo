@@ -8,6 +8,7 @@ Type=oneshot
 User=lima
 Group=lima
 EnvironmentFile=/etc/aven/estoque-campo.env
+EnvironmentFile=-/etc/aven/estoque-campo-backup.env
 Environment=BACKUP_ROOT=/var/backups/estoque-campo
 ExecStart=/opt/estoque-campo/deploy/backup.sh
 UMask=0077

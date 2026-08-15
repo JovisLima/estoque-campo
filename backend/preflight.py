@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from database import engine
 from settings import settings
+from storage import armazenamento
 
 
 def verificar_migracao() -> None:
@@ -37,6 +38,7 @@ def executar() -> None:
         raise RuntimeError("preflight deve executar com APP_ENV=production")
     verificar_migracao()
     verificar_diretorio_dados()
+    armazenamento.verificar_acesso()
     print("Preflight do backend concluido.")
 
 

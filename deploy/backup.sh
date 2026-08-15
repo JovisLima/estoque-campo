@@ -48,3 +48,26 @@ tar --create --gzip --one-file-system \
 mv -- "$temporario" "$destino"
 temporario=""
 echo "Backup concluido: $destino"
+
+if [[ -n "${BACKUP_S3_URI:-}" ]]; then
+  if ! command -v aws >/dev/null 2>&1; then
+    echo "BACKUP_S3_URI configurado, mas o AWS CLI nao esta instalado" >&2
+    exit 1
+  fi
+
+  remoto="${BACKUP_S3_URI%/}/$timestamp"
+  aws_opcoes=()
+  if [[ -n "${AWS_ENDPOINT_URL:-}" ]]; then
+    aws_opcoes+=(--endpoint-url "$AWS_ENDPOINT_URL")
+  fi
+
+  aws "${aws_opcoes[@]}" s3 cp \
+    "$destino" "$remoto/" \
+    --recursive --only-show-errors
+
+  aws "${aws_opcoes[@]}" s3 cp \
+    "$remoto/SHA256SUMS" - --only-show-errors \
+    | cmp - "$destino/SHA256SUMS"
+
+  echo "Backup externo verificado: $remoto"
+fi

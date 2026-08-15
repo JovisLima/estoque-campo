@@ -1,4 +1,3 @@
-import hashlib
 import ipaddress
 import json
 import re
@@ -11,7 +10,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 import models
+from audit import registrar_auditoria
 from database import get_db
+from system_services import (
+    calcular_versao_configuracao,
+    configuracao_publicada,
+    janelas_publicaveis,
+    publicar_configuracao,
+)
 
 
 CODIGO_RE = re.compile(r"^[A-Z0-9][A-Z0-9_-]{1,63}$")
@@ -46,6 +52,9 @@ class MonitorLinkCreate(BaseModel):
     if_index: int = Field(gt=0)
     operadora: str = Field(min_length=1, max_length=120)
     papel: str
+    probe_tipo: str
+    probe_host: str
+    probe_porta: Optional[int] = Field(default=None, ge=1, le=65535)
     ativo: bool = True
 
     @field_validator("papel")
@@ -55,6 +64,30 @@ class MonitorLinkCreate(BaseModel):
         if papel not in {"PRIMARIO", "BACKUP"}:
             raise ValueError("papel deve ser PRIMARIO ou BACKUP")
         return papel
+
+    @field_validator("probe_tipo")
+    @classmethod
+    def validar_probe_tipo(cls, valor: str) -> str:
+        tipo = valor.strip().upper()
+        if tipo not in {"ICMP", "TCP"}:
+            raise ValueError("probe_tipo deve ser ICMP ou TCP")
+        return tipo
+
+    @field_validator("probe_host")
+    @classmethod
+    def validar_probe_host(cls, valor: str) -> str:
+        try:
+            return str(ipaddress.ip_address(valor.strip()))
+        except ValueError as erro:
+            raise ValueError("probe_host deve ser um endereco IP") from erro
+
+    @model_validator(mode="after")
+    def validar_probe_porta(self):
+        if self.probe_tipo == "TCP" and self.probe_porta is None:
+            raise ValueError("probe_porta e obrigatoria para probe TCP")
+        if self.probe_tipo == "ICMP" and self.probe_porta is not None:
+            raise ValueError("probe_porta nao se aplica ao probe ICMP")
+        return self
 
 
 class MonitorTopologiaCreate(BaseModel):
@@ -106,6 +139,9 @@ class MonitorTopologiaCreate(BaseModel):
             raise ValueError("if_index duplicado no mesmo dispositivo")
         if len(nomes) != len(set(nomes)):
             raise ValueError("nomes de link duplicados")
+        probes = [link.probe_host for link in self.links]
+        if len(probes) != len(set(probes)):
+            raise ValueError("cada WAN deve usar um probe_host diferente")
         if not any(link.papel == "PRIMARIO" for link in self.links):
             raise ValueError("informe ao menos um link PRIMARIO")
 
@@ -129,6 +165,9 @@ def serializar_link(link: models.MonitorLink) -> dict:
         "if_index": link.if_index,
         "operadora": link.operadora,
         "papel": link.papel,
+        "probe_tipo": link.probe_tipo,
+        "probe_host": link.probe_host,
+        "probe_porta": link.probe_porta,
         "ativo": link.ativo,
     }
 
@@ -250,6 +289,9 @@ def montar_dispositivo_configuracao(
                 "if_index": link.if_index,
                 "operadora": link.operadora,
                 "papel": link.papel,
+                "probe_tipo": link.probe_tipo,
+                "probe_host": link.probe_host,
+                "probe_porta": link.probe_porta,
             }
             for link in sorted(
                 links_ativos,
@@ -262,6 +304,7 @@ def montar_dispositivo_configuracao(
 def criar_topologia(
     dados: MonitorTopologiaCreate,
     db: Session,
+    admin=None,
 ) -> dict:
     if dados.ativo:
         raise HTTPException(
@@ -340,6 +383,16 @@ def criar_topologia(
             "codigo do dispositivo ou IP WireGuard ja cadastrado",
         )
 
+    probes = [item.probe_host for item in dados.links]
+    probe_existente = db.query(models.MonitorLink).filter(
+        models.MonitorLink.probe_host.in_(probes)
+    ).first()
+    if probe_existente:
+        raise HTTPException(
+            409,
+            f"probe_host {probe_existente.probe_host} ja pertence a outra WAN",
+        )
+
     dispositivo = models.MonitorDispositivo(
         unidade_id=unidade.id,
         codigo=dispositivo_codigo,
@@ -359,10 +412,31 @@ def criar_topologia(
             if_index=item.if_index,
             operadora=item.operadora.strip(),
             papel=item.papel,
+            probe_tipo=item.probe_tipo,
+            probe_host=item.probe_host,
+            probe_porta=item.probe_porta,
             ativo=item.ativo,
         ))
 
     try:
+        db.flush()
+        publicar_configuracao_atual(
+            db,
+            admin.id if admin else None,
+            f"Topologia {dispositivo.codigo} cadastrada",
+        )
+        registrar_auditoria(
+            db,
+            ator=admin,
+            acao="CRIAR_TOPOLOGIA",
+            entidade_tipo="MONITOR_DISPOSITIVO",
+            entidade_id=dispositivo.id,
+            depois={
+                "codigo": dispositivo.codigo,
+                "unidade": unidade.codigo,
+                "links": [item.codigo for item in dados.links],
+            },
+        )
         db.commit()
     except IntegrityError as erro:
         db.rollback()
@@ -381,7 +455,7 @@ def criar_topologia(
     }
 
 
-def montar_configuracao_monitor(db: Session) -> dict:
+def montar_conteudo_configuracao_atual(db: Session) -> dict:
     dispositivos = db.query(models.MonitorDispositivo).join(
         models.MonitorUnidade
     ).join(models.MonitorCliente).filter(
@@ -399,18 +473,41 @@ def montar_configuracao_monitor(db: Session) -> dict:
         if dados_dispositivo is not None:
             configuracao[dispositivo.codigo] = dados_dispositivo
 
-    conteudo = json.dumps(
-        configuracao,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
+    return {
+        "dispositivos": configuracao,
+        "manutencoes": janelas_publicaveis(db),
+    }
+
+
+def publicar_configuracao_atual(
+    db: Session,
+    admin_id: int | None,
+    motivo: str,
+):
+    # SessionLocal usa autoflush=False; o snapshot precisa enxergar as
+    # alteracoes ainda nao commitadas que motivaram a publicacao.
+    db.flush()
+    return publicar_configuracao(
+        db,
+        montar_conteudo_configuracao_atual(db),
+        admin_id=admin_id,
+        motivo=motivo,
     )
-    versao = hashlib.sha256(conteudo.encode("utf-8")).hexdigest()
+
+
+def montar_configuracao_monitor(db: Session) -> dict:
+    publicada = configuracao_publicada(db)
+    if publicada:
+        conteudo, registro = publicada
+        versao = registro.versao
+    else:
+        conteudo = montar_conteudo_configuracao_atual(db)
+        versao = calcular_versao_configuracao(conteudo)
 
     return {
         "versao": versao,
         "gerado_em": datetime.utcnow().isoformat(timespec="seconds"),
-        "dispositivos": configuracao,
+        **conteudo,
     }
 
 
@@ -487,8 +584,9 @@ def criar_router_monitoramento(
     def cadastrar_topologia(
         dados: MonitorTopologiaCreate,
         db: Session = Depends(get_db),
+        admin=Depends(exigir_gerencia),
     ):
-        return criar_topologia(dados, db)
+        return criar_topologia(dados, db, admin)
 
     @router.patch(
         "/admin/monitoramento/dispositivos/{dispositivo_id}/ativo",
@@ -498,6 +596,7 @@ def criar_router_monitoramento(
         dispositivo_id: int,
         dados: MonitorAtivoUpdate,
         db: Session = Depends(get_db),
+        admin=Depends(exigir_gerencia),
     ):
         dispositivo = db.get(models.MonitorDispositivo, dispositivo_id)
         if not dispositivo:
@@ -507,6 +606,16 @@ def criar_router_monitoramento(
             raise HTTPException(
                 409,
                 "Nao e possivel ativar dispositivo sem link ativo",
+            )
+
+        if dados.ativo and any(
+            not link.probe_host or not link.probe_tipo
+            for link in dispositivo.links
+            if link.ativo
+        ):
+            raise HTTPException(
+                409,
+                "Todos os links ativos precisam de probe WAN configurado",
             )
 
         if dados.ativo:
@@ -529,8 +638,23 @@ def criar_router_monitoramento(
                     "Execute e aprove um teste de conectividade nos ultimos 30 minutos",
                 )
 
+        anterior = dispositivo.ativo
         dispositivo.ativo = dados.ativo
         dispositivo.atualizado_em = datetime.utcnow()
+        publicar_configuracao_atual(
+            db,
+            admin.id,
+            f"Dispositivo {dispositivo.codigo} {'ativado' if dados.ativo else 'desativado'}",
+        )
+        registrar_auditoria(
+            db,
+            ator=admin,
+            acao="ALTERAR_DISPOSITIVO",
+            entidade_tipo="MONITOR_DISPOSITIVO",
+            entidade_id=dispositivo.id,
+            antes={"ativo": anterior},
+            depois={"ativo": dispositivo.ativo},
+        )
         db.commit()
 
         return {
@@ -547,6 +671,7 @@ def criar_router_monitoramento(
         link_id: int,
         dados: MonitorAtivoUpdate,
         db: Session = Depends(get_db),
+        admin=Depends(exigir_gerencia),
     ):
         link = db.get(models.MonitorLink, link_id)
         if not link:
@@ -566,8 +691,23 @@ def criar_router_monitoramento(
                 "Desative o dispositivo antes de desativar o ultimo link",
             )
 
+        anterior = link.ativo
         link.ativo = dados.ativo
         link.atualizado_em = datetime.utcnow()
+        publicar_configuracao_atual(
+            db,
+            admin.id,
+            f"Link {link.codigo} {'ativado' if dados.ativo else 'desativado'}",
+        )
+        registrar_auditoria(
+            db,
+            ator=admin,
+            acao="ALTERAR_LINK",
+            entidade_tipo="MONITOR_LINK",
+            entidade_id=link.id,
+            antes={"ativo": anterior},
+            depois={"ativo": link.ativo},
+        )
         db.commit()
 
         return serializar_link(link)
@@ -580,6 +720,7 @@ def criar_router_monitoramento(
     def solicitar_teste(
         dispositivo_id: int,
         db: Session = Depends(get_db),
+        admin=Depends(exigir_gerencia),
     ):
         dispositivo = db.get(models.MonitorDispositivo, dispositivo_id)
         if not dispositivo:
@@ -612,6 +753,15 @@ def criar_router_monitoramento(
             status="PENDENTE",
         )
         db.add(teste)
+        db.flush()
+        registrar_auditoria(
+            db,
+            ator=admin,
+            acao="SOLICITAR_TESTE",
+            entidade_tipo="MONITOR_TESTE",
+            entidade_id=teste.id,
+            depois={"dispositivo_id": dispositivo.id},
+        )
         db.commit()
         db.refresh(teste)
 

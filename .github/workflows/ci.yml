@@ -44,9 +44,37 @@ jobs:
       - name: Migração PostgreSQL
         working-directory: backend
         run: |
+          alembic -c alembic.ini upgrade 0001
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+          engine = create_engine(os.environ["DATABASE_URL"])
+          with engine.begin() as connection:
+              connection.execute(text(
+                  "INSERT INTO contas_financeiras "
+                  "(tipo, descricao, valor, vencimento, status, data_pagamento) "
+                  "VALUES ('pagar', 'Teste CI', 123.456, '2026-08-31', "
+                  "'pago', '2026-08-15')"
+              ))
+          PY
           alembic -c alembic.ini upgrade head
           alembic -c alembic.ini current
           alembic -c alembic.ini check
+          python - <<'PY'
+          import os
+          from datetime import date
+          from decimal import Decimal
+          from sqlalchemy import create_engine, text
+          engine = create_engine(os.environ["DATABASE_URL"])
+          with engine.connect() as connection:
+              row = connection.execute(text(
+                  "SELECT valor, vencimento, data_pagamento "
+                  "FROM contas_financeiras WHERE descricao = 'Teste CI'"
+              )).one()
+          assert row.valor == Decimal("123.46")
+          assert row.vencimento == date(2026, 8, 31)
+          assert row.data_pagamento == date(2026, 8, 15)
+          PY
       - name: Testes
         run: pytest -q
       - name: Sintaxe Python e JavaScript

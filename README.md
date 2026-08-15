@@ -40,7 +40,9 @@ O painel agora tem login individual por usuário (não é mais uma senha
   usuários do painel.
 
 O primeiro usuário (`admin`, papel gerência) é criado pelo `seed.py`. A
-partir dele, crie os outros pela aba "Usuários do painel".
+partir dele, crie os outros pela aba "Usuários do painel". O backend impede a
+desativação da própria conta e a remoção da última Gerência ativa; mudanças de
+papel, técnicos, financeiro e monitoramento entram na trilha de auditoria.
 
 ## Como funciona o fluxo
 
@@ -125,17 +127,26 @@ Cliente > Unidade > Dispositivo > Links WAN
 
 O cadastro nasce inativo. Depois de configurar WireGuard e a community no
 servidor do agente, a Gerência solicita um teste de conectividade pelo Desk.
-O AVEN Monitor consulta `sysName.0` e `ifOperStatus` e devolve o resultado ao
-backend. Somente um teste bem-sucedido nos últimos 30 minutos libera a
-ativação.
+O AVEN Monitor consulta `sysName.0`, `ifOperStatus` e um probe ICMP ou TCP
+exclusivo de cada WAN. O roteamento `/32` desse alvo deve passar pelo peer
+WireGuard e sair pela WAN correspondente no MikroTik. Somente um teste
+completo bem-sucedido nos últimos 30 minutos libera a ativação.
 
-Dispositivos ativos são entregues ao agente por uma rota autenticada. A
-community, as chaves privadas do WireGuard e os tokens não são armazenados no
-cadastro nem enviados ao Desk.
+Cada instalação do agente possui código e token próprios, criados no Desk. O
+token é armazenado somente como hash no backend e o valor bruto é exibido uma
+única vez. Dispositivos ativos são entregues por `/api/v1`; o contrato antigo
+continua disponível durante a migração. A community e as chaves privadas do
+WireGuard não são armazenadas no cadastro nem enviadas ao Desk.
 
 As OS automáticas ficam vinculadas ao cliente, à unidade, ao dispositivo e ao
-link por códigos estáveis. O contrato anterior de incidentes continua aceito
-para permitir implantação gradual.
+link por códigos estáveis. Sintomas da mesma unidade dentro da janela de
+correlação viram uma única OS, com causa provável e eventos preservados. A
+Gerência também pode programar manutenção, acompanhar heartbeat, consultar a
+auditoria, restaurar uma versão anterior da configuração e rotacionar tokens.
+
+Valores financeiros usam `Numeric` e datas nativas do banco. Fotos, rotas e
+PDFs podem permanecer em `APP_DATA_DIR` ou usar armazenamento S3 compatível
+com `OBJECT_STORAGE_BACKEND=s3`, sem alterar as referências existentes.
 
 Testes do módulo:
 

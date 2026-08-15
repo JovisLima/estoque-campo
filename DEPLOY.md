@@ -24,7 +24,7 @@ Atualize o sistema e instale os pacotes necessários:
 sudo apt update
 sudo apt full-upgrade -y
 sudo apt install -y git nginx postgresql postgresql-client python3-venv \
-  certbot python3-certbot-nginx ufw
+  certbot python3-certbot-nginx ufw awscli
 ```
 
 Crie o usuário de serviço caso ele ainda não exista:
@@ -92,14 +92,20 @@ sudo nano /etc/aven/estoque-campo.env
 Preencha no mínimo:
 
 - `DATABASE_URL` com a senha do banco;
-- `JWT_SECRET_KEY` e `AVEN_MONITOR_API_TOKEN` com valores independentes
-  gerados por `openssl rand -hex 32`;
+- `JWT_SECRET_KEY` gerada por `openssl rand -hex 32`;
+- `AVEN_ALLOW_LEGACY_MONITOR_TOKEN=false`; o agente e o token individual são
+  criados depois no Desk;
 - `CORS_ALLOWED_ORIGINS` com as origens HTTPS realmente utilizadas;
 - `ALLOWED_HOSTS` com o domínio público;
 - `ADMIN_SENHA` com uma senha inicial forte e exclusiva.
 
 Produção rejeita SQLite, curingas de CORS/hosts, segredos fracos e senhas de
 bootstrap conhecidas. A documentação `/docs` permanece desativada por padrão.
+
+Se os anexos forem armazenados fora da VPS, configure
+`OBJECT_STORAGE_BACKEND=s3`, `S3_BUCKET`, `S3_PREFIX`, região/endpoint e uma
+credencial limitada ao prefixo. Mantenha `local` no primeiro deploy se esse
+armazenamento ainda não estiver contratado.
 
 ## 5. Migrar o banco e criar o primeiro administrador
 
@@ -201,8 +207,19 @@ sudo systemctl list-timers estoque-campo-backup.timer
 ```
 
 O backup inclui um `pg_dump` em formato custom, arquivos persistentes e
-checksums SHA-256. Copie os arquivos de `/var/backups/estoque-campo` para um
-destino externo à VPS e defina retenção nesse destino.
+checksums SHA-256. Para cópia externa automática:
+
+```bash
+sudo install -m 0600 -o root -g root \
+  /opt/estoque-campo/deploy/backup.env.example \
+  /etc/aven/estoque-campo-backup.env
+sudo nano /etc/aven/estoque-campo-backup.env
+sudo systemctl start estoque-campo-backup.service
+```
+
+Quando `BACKUP_S3_URI` está definido, o serviço envia o diretório e baixa o
+`SHA256SUMS` novamente para conferir a cópia. Aplique retenção/versionamento no
+bucket e use uma credencial limitada a esse prefixo.
 
 Um backup só é confiável depois de um ensaio de restauração em banco separado:
 
